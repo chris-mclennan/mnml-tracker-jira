@@ -73,7 +73,7 @@ async fn event_loop(
     Ok(())
 }
 
-fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &App) {
     let size = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)

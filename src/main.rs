@@ -2,11 +2,15 @@
 //! configurable per-tab JQL queries and (optionally) auto-resolved
 //! release fixVersions.
 //!
-//! Runs standalone (ratatui + crossterm) by default. Blit mode
-//! (`--blit <socket>` to be hosted by mnml/tmnl) lands in a follow-up.
+//! Runs standalone (ratatui + crossterm) by default. With
+//! `--blit <socket>` it connects to a tmnl-protocol server (mnml's
+//! `pane_host` or tmnl itself) and ships diff'd cell frames over the
+//! UDS instead of writing to stdout. The data layer + drawing code
+//! are identical between the two modes.
 
 mod app;
 mod auth;
+mod blit;
 mod config;
 mod jira;
 mod keys;
@@ -26,6 +30,12 @@ struct Cli {
     /// Print the resolved config + auth setup hints and exit.
     #[arg(long)]
     check: bool,
+
+    /// Run in blit-host mode: connect to the given Unix socket
+    /// (a tmnl-protocol server — usually mnml's `pane_host` slot)
+    /// and render cell frames over the wire instead of stdout.
+    #[arg(long, value_name = "SOCKET")]
+    blit: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -48,6 +58,10 @@ async fn main() -> Result<()> {
     let client = jira::Client::new(&cfg.jira_url, &cfg.email, &token)?;
 
     let mut app = app::App::new(cfg, client).await?;
-    ui::run(&mut app).await?;
+    if let Some(socket) = cli.blit.as_deref() {
+        blit::run(&mut app, socket).await?;
+    } else {
+        ui::run(&mut app).await?;
+    }
     Ok(())
 }

@@ -1,0 +1,45 @@
+[package]
+name = "mnml-tickets-jira"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Jira ticket viewer for mnml — terminal TUI with configurable tabs (JQL or auto-resolved releases). Runs standalone or as an mnml-hosted pane."
+homepage = "https://mnml.sh"
+repository = "https://github.com/chris-mclennan/mnml-tickets-jira"
+readme = "README.md"
+
+[[bin]]
+name = "mnml-tickets-jira"
+path = "src/main.rs"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# HTTP / async
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+
+# Config + serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utils
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+url = "2"
+webbrowser = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true

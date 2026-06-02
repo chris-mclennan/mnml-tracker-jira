@@ -134,8 +134,12 @@ jql  = "reporter = currentUser() ORDER BY updated DESC"
 }
 
 pub fn default_config_path() -> PathBuf {
-    dirs::config_dir()
+    // Use `~/.config/` everywhere (including macOS) — matches what
+    // the README documents and what the rest of the family TUIs do,
+    // rather than the OS-default `~/Library/Application Support/`.
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
         .join("mnml-tickets-jira.toml")
 }
 

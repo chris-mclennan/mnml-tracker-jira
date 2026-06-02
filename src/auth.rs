@@ -9,8 +9,10 @@ use std::path::PathBuf;
 
 /// Location of the API token file.
 pub fn token_path() -> PathBuf {
-    dirs::config_dir()
+    // Use `~/.config/` everywhere — see comment in `config.rs`.
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
         .join("mnml-tickets-jira")
         .join("token")
 }

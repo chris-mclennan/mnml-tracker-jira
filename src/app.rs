@@ -41,6 +41,12 @@ pub struct App {
     /// of the list. Loaded lazily — `transitions` is `None` while
     /// the fetch is in flight.
     pub transition_picker: Option<TransitionPicker>,
+    /// AccountId of the authenticated user, fetched once on first
+    /// use (the unwatch DELETE endpoint requires it as a query
+    /// param). `None` ⇒ not fetched yet; `Some(Err)` ⇒ permanent
+    /// error (e.g. token revoked) — `w` no-ops with a status toast
+    /// rather than retrying every keypress.
+    pub my_account_id: Option<Result<String, String>>,
 }
 
 /// Modal state for the `t` transition picker.
@@ -111,6 +117,7 @@ impl App {
             detail_in_flight: None,
             filter: None,
             transition_picker: None,
+            my_account_id: None,
         };
         app.refresh_active().await;
         Ok(app)
@@ -442,6 +449,80 @@ impl App {
         }
     }
 
+    /// Toggle watch state on the focused ticket. Direction is
+    /// derived from `detail.watching` — needs the detail cached
+    /// (force-fetches if not), so the toggle reflects the current
+    /// server state. After the API call succeeds we drop the cached
+    /// detail for this key so the next render shows the updated
+    /// watcher count.
+    pub async fn toggle_watch(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        // Make sure the detail is loaded — we need `watching` to know
+        // which direction to toggle.
+        self.ensure_focused_detail().await;
+        let was_watching = self
+            .detail_cache
+            .get(&key)
+            .map(|d| d.watching)
+            .unwrap_or(false);
+        let result = if was_watching {
+            // Unwatch needs the authenticated user's accountId.
+            let account_id = match self.fetch_or_cached_account_id().await {
+                Some(id) => id,
+                None => {
+                    return; // Status line already explains.
+                }
+            };
+            self.client.unwatch_issue(&key, &account_id).await
+        } else {
+            self.client.watch_issue(&key).await
+        };
+        match result {
+            Ok(()) => {
+                let verb = if was_watching { "unwatched" } else { "watched" };
+                self.status = format!("{verb} {key}");
+                // The watch_count + isWatching on the server changed;
+                // drop the cache so re-render shows fresh state.
+                self.detail_cache.remove(&key);
+                if self.details_visible {
+                    self.ensure_focused_detail().await;
+                }
+            }
+            Err(e) => {
+                self.status = format!("watch toggle failed for {key}: {e}");
+            }
+        }
+    }
+
+    /// Lazy-fetch the authenticated user's accountId, caching the
+    /// success / permanent-failure result on `self.my_account_id`.
+    /// Returns `None` and toasts the error on failure.
+    async fn fetch_or_cached_account_id(&mut self) -> Option<String> {
+        if let Some(slot) = self.my_account_id.as_ref() {
+            return match slot {
+                Ok(id) => Some(id.clone()),
+                Err(e) => {
+                    self.status = format!("can't unwatch — myself fetch failed earlier: {e}");
+                    None
+                }
+            };
+        }
+        match self.client.myself().await {
+            Ok(id) => {
+                self.my_account_id = Some(Ok(id.clone()));
+                Some(id)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                self.my_account_id = Some(Err(msg.clone()));
+                self.status = format!("myself fetch failed: {msg}");
+                None
+            }
+        }
+    }
+
     /// Commit the highlighted transition. Closes the picker on
     /// success; leaves it open with an error message on failure.
     /// Invalidates the cached detail for the issue (status changed)
@@ -570,6 +651,7 @@ mod tests {
             detail_in_flight: None,
             filter: None,
             transition_picker: None,
+            my_account_id: None,
         }
     }
 

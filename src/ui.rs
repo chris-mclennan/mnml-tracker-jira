@@ -166,13 +166,22 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
         draw_filter_strip(f, a, app);
     }
 
-    let header = Row::new(vec![
-        Cell::from("KEY"),
-        Cell::from("STATUS"),
-        Cell::from("ASSIGNEE"),
-        Cell::from("UPDATED"),
-        Cell::from("SUMMARY"),
-    ])
+    // Per-tab column override — falls back to the family default
+    // (key, status, assignee, updated, summary). Resolved on every
+    // draw so config reloads (future) would pick up changes.
+    let columns: Vec<crate::config::Column> = app
+        .cfg
+        .tabs
+        .get(app.active_tab)
+        .and_then(|t| t.columns.clone())
+        .unwrap_or_else(crate::config::Column::default_set);
+
+    let header = Row::new(
+        columns
+            .iter()
+            .map(|c| Cell::from(c.header()))
+            .collect::<Vec<_>>(),
+    )
     .style(
         Style::default()
             .fg(Color::DarkGray)
@@ -185,42 +194,18 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|&idx| &tab.issues[idx])
         .map(|i| {
-            let status = i
-                .fields
-                .status
-                .as_ref()
-                .map(|s| s.name.as_str())
-                .unwrap_or("?");
-            let assignee = i
-                .fields
-                .assignee
-                .as_ref()
-                .map(|a| a.display_name.as_str())
-                .unwrap_or("—");
-            let updated = i
-                .fields
-                .updated
-                .as_deref()
-                .map(format_updated)
-                .unwrap_or_else(|| "—".to_string());
-            let summary = i.fields.summary.as_str();
-            Row::new(vec![
-                Cell::from(i.key.clone()).style(Style::default().fg(Color::Yellow)),
-                Cell::from(status.to_string()).style(status_color(status)),
-                Cell::from(assignee.to_string()),
-                Cell::from(updated),
-                Cell::from(summary.to_string()),
-            ])
+            let cells: Vec<Cell> = columns.iter().map(|c| cell_for_column(i, *c)).collect();
+            Row::new(cells)
         })
         .collect();
 
-    let widths = [
-        Constraint::Length(10),
-        Constraint::Length(14),
-        Constraint::Length(20),
-        Constraint::Length(12),
-        Constraint::Min(20),
-    ];
+    let widths: Vec<Constraint> = columns
+        .iter()
+        .map(|c| match c.width() {
+            Some(w) => Constraint::Length(w),
+            None => Constraint::Min(20),
+        })
+        .collect();
 
     let title = if app.filter.is_some() && visible.len() != total {
         format!(" {} ({}/{}) ", tab.name, visible.len(), total)
@@ -303,9 +288,9 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     } else if app.filter.as_ref().map(|f| f.editing).unwrap_or(false) {
         " type to filter · Enter commit · Esc cancel "
     } else if app.details_visible {
-        " ↑↓/jk move · Ctrl+u/d scroll · d/Esc close · / filter · t transition · r refresh · o open · q quit "
+        " ↑↓/jk move · Ctrl+u/d scroll · d/Esc close · / filter · t move · w watch · r refresh · o open · q quit "
     } else {
-        " 1-9 tab · ↑↓/jk move · / filter · t transition · d details · Enter/o open · r refresh · q quit "
+        " 1-9 tab · ↑↓/jk move · / filter · t move · w watch · d details · Enter/o open · r refresh · q quit "
     };
     let line = Line::from(vec![
         Span::styled(
@@ -399,6 +384,39 @@ fn draw_details(f: &mut Frame, area: Rect, app: &App) {
         meta_line("fixVersion", &fix),
         Line::from(""),
     ];
+
+    // Watcher chip — surfaces alongside the meta lines once the
+    // detail is loaded. `★` = watching, `☆` = not.
+    if let Some(detail) = app.focused_detail() {
+        let glyph = if detail.watching { "★" } else { "☆" };
+        let label = if detail.watching {
+            format!("watching ({} total)", detail.watch_count)
+        } else if detail.watch_count == 0 {
+            "no watchers".to_string()
+        } else {
+            format!("{} watcher(s)", detail.watch_count)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  watcher: ",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::styled(
+                format!("{glyph} "),
+                if detail.watching {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::raw(label),
+        ]));
+        lines.push(Line::from(""));
+    }
 
     // Body — description + comments, lazy-loaded.
     if let Some(detail) = app.focused_detail() {
@@ -585,6 +603,66 @@ fn section_header(label: &str) -> Line<'static> {
 /// `2026-01-15T12:34:56.789+0000` → `2026-01-15`.
 fn format_updated(s: &str) -> String {
     s.split('T').next().unwrap_or(s).to_string()
+}
+
+/// Build a single styled table cell for `issue` × `column`. Handles
+/// the per-column missing-data fallback (`—`) and the per-column
+/// color theme (yellow KEY, status-themed STATUS, plain for others).
+fn cell_for_column(issue: &crate::jira::Issue, column: crate::config::Column) -> Cell<'static> {
+    use crate::config::Column;
+    let f = &issue.fields;
+    match column {
+        Column::Key => Cell::from(issue.key.clone()).style(Style::default().fg(Color::Yellow)),
+        Column::Status => {
+            let s = f.status.as_ref().map(|x| x.name.as_str()).unwrap_or("?");
+            Cell::from(s.to_string()).style(status_color(s))
+        }
+        Column::Assignee => {
+            let s = f
+                .assignee
+                .as_ref()
+                .map(|x| x.display_name.as_str())
+                .unwrap_or("—");
+            Cell::from(s.to_string())
+        }
+        Column::Reporter => {
+            let s = f
+                .reporter
+                .as_ref()
+                .map(|x| x.display_name.as_str())
+                .unwrap_or("—");
+            Cell::from(s.to_string())
+        }
+        Column::Priority => {
+            let s = f.priority.as_ref().map(|x| x.name.as_str()).unwrap_or("—");
+            Cell::from(s.to_string())
+        }
+        Column::Type => {
+            let s = f.issuetype.as_ref().map(|x| x.name.as_str()).unwrap_or("—");
+            Cell::from(s.to_string())
+        }
+        Column::Updated => {
+            let s = f
+                .updated
+                .as_deref()
+                .map(format_updated)
+                .unwrap_or_else(|| "—".to_string());
+            Cell::from(s)
+        }
+        Column::FixVersion => {
+            let s = if f.fix_versions.is_empty() {
+                "—".to_string()
+            } else {
+                f.fix_versions
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            Cell::from(s)
+        }
+        Column::Summary => Cell::from(f.summary.clone()),
+    }
 }
 
 fn status_color(name: &str) -> Style {

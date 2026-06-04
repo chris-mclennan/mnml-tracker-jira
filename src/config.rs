@@ -43,6 +43,74 @@ pub struct Tab {
     /// Component filter (e.g. "Mobile"). Optional when `mode` is set.
     #[serde(default)]
     pub component: Option<String>,
+    /// Override the default column set for this tab. Useful when one
+    /// tab is "Mine" and you want to see priority + reporter, while
+    /// another tab is a release-tracking view where assignee + updated
+    /// matter more. `None` ⇒ use the family default (key, status,
+    /// assignee, updated, summary).
+    #[serde(default)]
+    pub columns: Option<Vec<Column>>,
+}
+
+/// One column in the issue table. Used in per-tab overrides via
+/// `[[tabs]] columns = [...]`. Case is preserved on input; serde
+/// expects snake-case strings (`"fix_version"`, etc.).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Column {
+    Key,
+    Status,
+    Assignee,
+    Reporter,
+    Priority,
+    Type,
+    Updated,
+    FixVersion,
+    Summary,
+}
+
+impl Column {
+    /// The family default — what every tab gets when `columns` is unset.
+    pub fn default_set() -> Vec<Column> {
+        vec![
+            Column::Key,
+            Column::Status,
+            Column::Assignee,
+            Column::Updated,
+            Column::Summary,
+        ]
+    }
+
+    /// Header label for the column.
+    pub fn header(self) -> &'static str {
+        match self {
+            Column::Key => "KEY",
+            Column::Status => "STATUS",
+            Column::Assignee => "ASSIGNEE",
+            Column::Reporter => "REPORTER",
+            Column::Priority => "PRIORITY",
+            Column::Type => "TYPE",
+            Column::Updated => "UPDATED",
+            Column::FixVersion => "FIXVERSION",
+            Column::Summary => "SUMMARY",
+        }
+    }
+
+    /// Render width (in cells) — `None` ⇒ "fill remaining space"
+    /// (used by Summary; only one such column makes sense per row).
+    pub fn width(self) -> Option<u16> {
+        match self {
+            Column::Key => Some(10),
+            Column::Status => Some(14),
+            Column::Assignee => Some(20),
+            Column::Reporter => Some(20),
+            Column::Priority => Some(10),
+            Column::Type => Some(10),
+            Column::Updated => Some(12),
+            Column::FixVersion => Some(14),
+            Column::Summary => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +170,12 @@ component = "Mobile"
 [[tabs]]
 name = "Mine"
 jql  = "reporter = currentUser() ORDER BY updated DESC"
+# Per-tab column override — drop one or both list entries to use the
+# default (key/status/assignee/updated/summary). Valid values:
+# "key", "status", "assignee", "reporter", "priority", "type",
+# "updated", "fix_version", "summary". `summary` should be last —
+# it's the only column that fills remaining row width.
+columns = ["key", "priority", "status", "updated", "summary"]
 "##;
 
     pub fn validate(&self) -> Result<()> {
@@ -226,6 +300,72 @@ mod tests {
             cfg.tabs
                 .iter()
                 .any(|t| t.mode == Some(ResolveMode::NextRelease))
+        );
+    }
+
+    #[test]
+    fn example_config_parses_columns_override_on_mine_tab() {
+        let cfg: Config = toml::from_str(Config::EXAMPLE).unwrap();
+        let mine = cfg.tabs.iter().find(|t| t.name == "Mine").unwrap();
+        assert_eq!(
+            mine.columns,
+            Some(vec![
+                Column::Key,
+                Column::Priority,
+                Column::Status,
+                Column::Updated,
+                Column::Summary,
+            ])
+        );
+    }
+
+    #[test]
+    fn columns_default_set_is_the_five_classic_columns() {
+        assert_eq!(
+            Column::default_set(),
+            vec![
+                Column::Key,
+                Column::Status,
+                Column::Assignee,
+                Column::Updated,
+                Column::Summary,
+            ]
+        );
+    }
+
+    #[test]
+    fn columns_summary_has_no_explicit_width() {
+        assert!(Column::Summary.width().is_none());
+        // Every non-summary column has a fixed width.
+        for c in [
+            Column::Key,
+            Column::Status,
+            Column::Assignee,
+            Column::Reporter,
+            Column::Priority,
+            Column::Type,
+            Column::Updated,
+            Column::FixVersion,
+        ] {
+            assert!(c.width().is_some(), "{c:?} should have a fixed width");
+        }
+    }
+
+    #[test]
+    fn columns_snake_case_serde_round_trip() {
+        let toml_in = r##"
+jira_url = "https://x.atlassian.net"
+email = "a@b.c"
+
+[[tabs]]
+name = "Demo"
+jql = "x"
+columns = ["fix_version", "summary"]
+"##;
+        let cfg: Config = toml::from_str(toml_in).unwrap();
+        assert_eq!(
+            cfg.tabs[0].columns,
+            Some(vec![Column::FixVersion, Column::Summary])
         );
     }
 

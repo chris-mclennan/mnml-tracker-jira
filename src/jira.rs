@@ -140,6 +140,77 @@ impl Client {
             .collect())
     }
 
+    /// Add the authenticated user as a watcher of `key`. Jira's POST
+    /// endpoint with an empty body watches as the basic-auth user, so
+    /// we don't need the accountId for this direction.
+    pub async fn watch_issue(&self, key: &str) -> Result<()> {
+        let url = format!("{}/rest/api/3/issue/{key}/watchers", self.base);
+        // The endpoint accepts an empty string for "current user".
+        let resp = self
+            .http
+            .post(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .body("\"\"")
+            .send()
+            .await
+            .with_context(|| format!("watching {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Jira watch failed for {key}: {status}: {text}"));
+        }
+        Ok(())
+    }
+
+    /// Drop `account_id` from the watcher list of `key`. The accountId
+    /// is required by the DELETE endpoint; for the authenticated-user
+    /// case fetch it once via [`Self::myself`] and pass it in.
+    pub async fn unwatch_issue(&self, key: &str, account_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/rest/api/3/issue/{key}/watchers?accountId={account_id}",
+            self.base
+        );
+        let resp = self
+            .http
+            .delete(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .with_context(|| format!("unwatching {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Jira unwatch failed for {key}: {status}: {text}"));
+        }
+        Ok(())
+    }
+
+    /// Return the authenticated user's accountId. Required for the
+    /// unwatch DELETE call; cache it once per session at the call
+    /// site (App owns the cache, not the Client — keeps the Client
+    /// stateless / re-runnable).
+    pub async fn myself(&self) -> Result<String> {
+        let url = format!("{}/rest/api/3/myself", self.base);
+        let resp = self
+            .http
+            .get(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .context("fetching authenticated user")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Jira myself failed: {status}: {text}"));
+        }
+        let raw: MyselfRaw = resp.json().await.context("parsing myself response")?;
+        Ok(raw.account_id)
+    }
+
     /// Fire a workflow transition by id. Returns `Ok(())` on success
     /// (Jira returns 204 No Content on a successful transition).
     pub async fn run_transition(&self, key: &str, transition_id: &str) -> Result<()> {
@@ -166,14 +237,13 @@ impl Client {
         Ok(())
     }
 
-    /// Fetch a single issue's description + comments. The fields
-    /// already on `Issue` (status, assignee, …) are included too so
-    /// the detail view can re-read updated state without a stale
-    /// pre-detail fetch. Used to populate the right-half detail
-    /// panel when an issue gets focus there.
+    /// Fetch a single issue's description + comments + watch state.
+    /// The fields already on `Issue` (status, assignee, …) are
+    /// included too so the detail view can re-read updated state
+    /// without a stale pre-detail fetch.
     pub async fn fetch_issue_detail(&self, key: &str) -> Result<IssueDetail> {
         let url = format!(
-            "{}/rest/api/3/issue/{key}?fields=description,comment,summary,status,assignee,issuetype,priority,fixVersions,updated,reporter",
+            "{}/rest/api/3/issue/{key}?fields=description,comment,watches,summary,status,assignee,issuetype,priority,fixVersions,updated,reporter",
             self.base
         );
         let resp = self
@@ -215,19 +285,38 @@ impl Client {
                     .collect()
             })
             .unwrap_or_default();
+        let watches = raw.fields.watches.unwrap_or_default();
         Ok(IssueDetail {
             description,
             comments,
+            watching: watches.is_watching,
+            watch_count: watches.watch_count,
         })
     }
 }
 
-/// One ticket's narrative content — description + the comment thread.
-/// Lazy-loaded per-issue when the detail pane is open.
+/// One ticket's narrative content — description + the comment thread,
+/// plus watch state. Lazy-loaded per-issue when the detail pane opens
+/// or `w` is pressed.
 #[derive(Debug, Clone, Default)]
 pub struct IssueDetail {
     pub description: Option<String>,
     pub comments: Vec<Comment>,
+    /// True when the authenticated user is currently a watcher of the
+    /// issue. Drives the watcher chip + the `w` toggle direction.
+    pub watching: bool,
+    /// Total watcher count (including non-self). Surfaces in the
+    /// detail header so the user can see whether anyone else cares.
+    pub watch_count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct MyselfRaw {
+    #[serde(rename = "accountId")]
+    account_id: String,
+    #[serde(default, rename = "displayName")]
+    display_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +362,16 @@ struct IssueDetailFieldsRaw {
     description: Option<serde_json::Value>,
     #[serde(default)]
     comment: Option<CommentListRaw>,
+    #[serde(default)]
+    watches: Option<WatchesRaw>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WatchesRaw {
+    #[serde(default, rename = "watchCount")]
+    watch_count: u32,
+    #[serde(default, rename = "isWatching")]
+    is_watching: bool,
 }
 
 #[derive(Debug, Deserialize)]

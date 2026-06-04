@@ -97,9 +97,54 @@ Modes:
 | `Ctrl+u` / `Ctrl+d` | Scroll detail panel up / down (when open) |
 | `/`            | Open filter editor (substring match)         |
 | `t`            | Open status transition picker for focused ticket |
+| `w`            | Toggle watch on focused ticket               |
 | `r`            | Refresh active tab (+ detail if open)        |
 | `Esc`          | Clear filter → close detail → quit (cascade) |
 | `q` / `Ctrl+C` | Quit                                         |
+
+### Watcher toggle
+
+`w` toggles your watch on the focused ticket. Direction is derived
+from the cached ticket detail (it includes `isWatching` alongside
+the watcher count), so the first press fetches the detail if the
+right-half panel hasn't already loaded it.
+
+The detail panel header shows `★ watching (4 total)` or
+`☆ 2 watcher(s)` — a glance at how many people are paying attention,
+and whether you're one of them.
+
+Unwatch requires Jira's `accountId`, which is fetched once per
+session via `/rest/api/3/myself` and cached. If that call fails
+(revoked token / scope), `w` toasts the error and falls back to
+no-op rather than retrying every keypress.
+
+### Per-tab column override
+
+Each `[[tabs]]` entry can override the default column set via
+`columns = [...]`. Default (when unset) is
+`["key", "status", "assignee", "updated", "summary"]`. Valid values:
+
+| value          | column            |
+|----------------|-------------------|
+| `key`          | TE-1234           |
+| `status`       | "In Review" etc.  |
+| `assignee`     | display name      |
+| `reporter`     | display name      |
+| `priority`     | "Highest" etc.    |
+| `type`         | "Bug", "Task", …  |
+| `updated`      | YYYY-MM-DD        |
+| `fix_version`  | comma-joined list |
+| `summary`      | ticket title      |
+
+`summary` is the only column that fills remaining width — put it
+last. Example, replacing assignee with priority on the "Mine" tab:
+
+```toml
+[[tabs]]
+name = "Mine"
+jql  = "reporter = currentUser() ORDER BY updated DESC"
+columns = ["key", "priority", "status", "updated", "summary"]
+```
 
 ### Status transition picker
 
@@ -177,10 +222,16 @@ newlines.
 - Status transition picker (`t`) — modal listing the focused
   ticket's available workflow transitions; POSTs the chosen
   one + refreshes the list
+- Watcher toggle (`w`) — POST/DELETE `/issue/{key}/watchers`,
+  with watcher chip on the detail panel header
+- Per-tab column override — `[[tabs]] columns = [...]` from a
+  fixed set (key, status, assignee, reporter, priority, type,
+  updated, fix_version, summary)
 
-**Planned:**
-- Watcher / star toggle
-- Per-tab column override
+**v0.2 is feature-complete.** Future tracks if useful:
+- bulk-transition / bulk-assign across selected rows
+- comment posting from the detail panel
+- inline-edit assignee / fixVersion
 
 ## License
 

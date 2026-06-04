@@ -34,6 +34,8 @@ pub enum Action {
     TransitionSelect(usize),
     TransitionCommit,
     TransitionCancel,
+    /// `w` — toggle watch state on the focused ticket.
+    ToggleWatch,
 }
 
 pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
@@ -105,6 +107,8 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
         // `t` opens the status-transition picker for the focused
         // ticket (greedy modal; picker keys take over the next event).
         KeyCode::Char('t') => Some(Action::OpenTransitionPicker),
+        // `w` toggles watch on the focused ticket.
+        KeyCode::Char('w') => Some(Action::ToggleWatch),
         // `d` (lowercase, no modifiers) toggles the detail pane.
         // Ctrl+d above takes precedence for scroll-down.
         KeyCode::Char('d') => Some(Action::ToggleDetails),
@@ -185,6 +189,7 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
         Action::TransitionSelect(i) => app.transition_picker_select(i),
         Action::TransitionCommit => app.commit_transition().await,
         Action::TransitionCancel => app.close_transition_picker(),
+        Action::ToggleWatch => app.toggle_watch().await,
     }
     // After a navigation action, if the focused key changed and the
     // detail pane is open, fetch the new ticket's detail. Reset the

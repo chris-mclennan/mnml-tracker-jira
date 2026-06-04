@@ -1,6 +1,6 @@
 //! Keyboard chord → action mapping. Kept small and centralized.
 
-use crate::app::App;
+use crate::app::{App, FilterClose};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub enum Action {
@@ -19,16 +19,45 @@ pub enum Action {
     ToggleDetails,
     DetailScrollUp,
     DetailScrollDown,
+    OpenFilter,
+    /// Filter-editor key (`Some(ch)` to insert; `None` for backspace).
+    FilterEdit(Option<char>),
+    FilterCommit,
+    FilterCancel,
+    /// Drop the committed filter, returning to the full list.
+    FilterClear,
 }
 
 pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
     let m = key.modifiers;
+    // When the filter editor is open it greedily swallows keystrokes —
+    // every printable becomes part of the buffer, Esc cancels, Enter
+    // commits. The list/tab/detail chords below resume after the
+    // filter closes. This branch comes first so that e.g. `q` in the
+    // editor types a `q` instead of quitting the app.
+    if let Some(f) = app.filter.as_ref()
+        && f.editing
+    {
+        return match key.code {
+            KeyCode::Esc => Some(Action::FilterCancel),
+            KeyCode::Enter => Some(Action::FilterCommit),
+            KeyCode::Backspace => Some(Action::FilterEdit(None)),
+            KeyCode::Char(c) if !m.contains(KeyModifiers::CONTROL) => {
+                Some(Action::FilterEdit(Some(c)))
+            }
+            _ => None,
+        };
+    }
     match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
-        // Esc closes the detail pane when it's open, otherwise quits.
-        // Mirrors VS Code's "Esc closes the side panel" muscle memory.
+        // Esc cascade: clear an active committed filter, then close
+        // the detail panel, then quit. So a Esc-Esc-Esc safely
+        // unwinds from "filter + detail + ready to leave" without
+        // surprising the user.
         KeyCode::Esc => {
-            if app.details_visible {
+            if app.filter.is_some() {
+                Some(Action::FilterClear)
+            } else if app.details_visible {
                 Some(Action::ToggleDetails)
             } else {
                 Some(Action::Quit)
@@ -49,6 +78,9 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Enter | KeyCode::Char('o') => Some(Action::OpenInBrowser),
         KeyCode::Tab => Some(Action::NextTab),
         KeyCode::BackTab => Some(Action::PrevTab),
+        // `/` opens the filter editor — substring match against key
+        // + summary, case-insensitive, applies live as you type.
+        KeyCode::Char('/') => Some(Action::OpenFilter),
         // `d` (lowercase, no modifiers) toggles the detail pane.
         // Ctrl+d above takes precedence for scroll-down.
         KeyCode::Char('d') => Some(Action::ToggleDetails),
@@ -117,6 +149,12 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
                 app.details_scroll = app.details_scroll.saturating_add(4);
             }
         }
+        Action::OpenFilter => app.open_filter(),
+        Action::FilterEdit(Some(c)) => app.filter_insert(c),
+        Action::FilterEdit(None) => app.filter_backspace(),
+        Action::FilterCommit => app.close_filter(FilterClose::Commit),
+        Action::FilterCancel => app.close_filter(FilterClose::Cancel),
+        Action::FilterClear => app.filter = None,
     }
     // After a navigation action, if the focused key changed and the
     // detail pane is open, fetch the new ticket's detail. Reset the

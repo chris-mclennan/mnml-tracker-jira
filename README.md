@@ -95,9 +95,32 @@ Modes:
 | `Enter` / `o`  | Open focused ticket in browser               |
 | `d`            | Toggle right-half ticket detail panel        |
 | `Ctrl+u` / `Ctrl+d` | Scroll detail panel up / down (when open) |
+| `/`            | Open filter editor (substring match)         |
 | `r`            | Refresh active tab (+ detail if open)        |
-| `Esc`          | Close detail panel (or quit if already closed) |
+| `Esc`          | Clear filter → close detail → quit (cascade) |
 | `q` / `Ctrl+C` | Quit                                         |
+
+### Filter
+
+`/` opens a 1-row filter editor above the table. Substring match —
+case-insensitive — against both `KEY` and `SUMMARY`. The visible row
+count updates live as you type; `Enter` commits the filter (it stays
+applied while you scroll, switch tabs, etc.); `Esc` cancels and drops
+the filter.
+
+Selection stays consistent across filter changes: arrow-keys step
+through the *visible* rows only, and the cursor never lands on a
+filtered-out row. Tab title shows `(<visible>/<total>)` while a
+filter is active.
+
+`Esc` cascades through state when there's more than one thing to
+unwind:
+
+1. If a filter is committed, Esc clears it.
+2. Otherwise, if the detail panel is open, Esc closes it.
+3. Otherwise, Esc quits the app.
+
+So Esc-Esc-Esc safely leaves a "filter + detail + done" state.
 
 ### Detail panel
 
@@ -130,10 +153,11 @@ newlines.
   assignee / reporter / fixVersion + description + last 10 comments,
   lazy-loaded per issue key
 - Atlassian Document Format → plain text for description + comments
+- Filter editor (`/`) — substring match on key + summary,
+  case-insensitive, applies live; Esc cascade for cleanup
 
 **Planned:**
 - Status transition picker (`t` opens "move to → " menu)
-- Search/filter overlay within current tab (`/`)
 - Watcher / star toggle
 - Per-tab column override
 

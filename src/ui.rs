@@ -146,6 +146,22 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // Split off a 1-row filter strip above the table when there is
+    // any filter at all (open or committed). Otherwise the table
+    // gets the full body region.
+    let (filter_area, table_area) = if app.filter.is_some() {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+        (Some(parts[0]), parts[1])
+    } else {
+        (None, area)
+    };
+    if let Some(a) = filter_area {
+        draw_filter_strip(f, a, app);
+    }
+
     let header = Row::new(vec![
         Cell::from("KEY"),
         Cell::from("STATUS"),
@@ -159,9 +175,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows: Vec<Row> = tab
-        .issues
+    let visible = app.visible_indices();
+    let total = tab.issues.len();
+    let rows: Vec<Row> = visible
         .iter()
+        .map(|&idx| &tab.issues[idx])
         .map(|i| {
             let status = i
                 .fields
@@ -200,13 +218,15 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Min(20),
     ];
 
+    let title = if app.filter.is_some() && visible.len() != total {
+        format!(" {} ({}/{}) ", tab.name, visible.len(), total)
+    } else {
+        format!(" {} ", tab.name)
+    };
+
     let table = Table::new(rows, widths)
         .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" {} ", tab.name)),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .row_highlight_style(
             Style::default()
                 .bg(Color::DarkGray)
@@ -214,16 +234,77 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
         )
         .highlight_symbol("▸ ");
 
+    // Translate the raw `issues[]` index in `selected` into the
+    // visible-rows index — TableState selects by row position.
+    let visible_pos = visible.iter().position(|&i| i == tab.selected);
     let mut state = TableState::default();
-    state.select(Some(tab.selected));
-    f.render_stateful_widget(table, area, &mut state);
+    state.select(visible_pos);
+    f.render_stateful_widget(table, table_area, &mut state);
+}
+
+/// One-row filter strip above the table. Three visual states:
+///   editing       → `/<buffer>│`  (cursor block, cyan)
+///   committed     → `filter: <buffer>   Esc clears`  (dimmed)
+///   no filter     → not drawn (the caller skips when filter is None)
+fn draw_filter_strip(f: &mut Frame, area: Rect, app: &App) {
+    let Some(filter) = app.filter.as_ref() else {
+        return;
+    };
+    let line = if filter.editing {
+        // Render `/buffer│` — the `│` is the cursor block. Truncate
+        // the buffer so the cursor stays on-screen on a narrow strip.
+        let avail = area.width.saturating_sub(2) as usize;
+        let chars: Vec<char> = filter.buffer.chars().collect();
+        let cursor = filter.cursor.min(chars.len());
+        let start = if cursor >= avail {
+            cursor - avail + 1
+        } else {
+            0
+        };
+        let end = (start + avail).min(chars.len());
+        let head: String = chars[start..cursor].iter().collect();
+        let tail: String = chars[cursor..end].iter().collect();
+        Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::Cyan)),
+            Span::styled(head, Style::default().fg(Color::White)),
+            Span::styled("│", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                tail,
+                Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                "filter: ",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(filter.buffer.clone(), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "   Esc to clear · / to refine",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ])
+    };
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    let hint = if app.details_visible {
-        " ↑↓/jk move · Ctrl+u/d scroll detail · d/Esc close · r refresh · o open · q quit "
-    } else {
-        " 1-9 tab · ↑↓/jk move · d details · Enter/o open · r refresh · q quit "
+    let hint = match (
+        app.filter.as_ref().map(|f| f.editing).unwrap_or(false),
+        app.details_visible,
+    ) {
+        (true, _) => " type to filter · Enter commit · Esc cancel ",
+        (false, true) => {
+            " ↑↓/jk move · Ctrl+u/d scroll detail · d/Esc close · / filter · r refresh · o open · q quit "
+        }
+        (false, false) => {
+            " 1-9 tab · ↑↓/jk move · / filter · d details · Enter/o open · r refresh · q quit "
+        }
     };
     let line = Line::from(vec![
         Span::styled(

@@ -27,6 +27,22 @@ pub struct App {
     /// `Some(key)` while a detail-fetch is in flight, so we don't fire
     /// duplicate requests on rapid arrow-key navigation.
     pub detail_in_flight: Option<String>,
+    /// Active client-side filter (substring match against key + summary,
+    /// case-insensitive). Mode lifecycle:
+    ///   `None`            → no filter; show all issues.
+    ///   `Some(s)` + `editing == true` → user is typing; row count
+    ///     updates live as `s` changes.
+    ///   `Some(s)` + `editing == false` → filter committed; selection
+    ///     navigates within the filtered subset; `n`/`N` jump matches.
+    pub filter: Option<FilterState>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FilterState {
+    pub buffer: String,
+    pub cursor: usize,
+    /// True while `/` is open and the user hasn't hit Enter / Esc yet.
+    pub editing: bool,
 }
 
 pub struct TabState {
@@ -70,6 +86,7 @@ impl App {
             details_scroll: 0,
             detail_cache: HashMap::new(),
             detail_in_flight: None,
+            filter: None,
         };
         app.refresh_active().await;
         Ok(app)
@@ -94,13 +111,18 @@ impl App {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let len = self.active().issues.len();
-        if len == 0 {
+        // Step through `visible_indices()` rather than the raw issue
+        // list so a filter doesn't strand the selection on a hidden
+        // row. With no filter, visible_indices is `0..len`, so this
+        // behaves identically to a raw clamp.
+        let visible = self.visible_indices();
+        if visible.is_empty() {
             return;
         }
-        let s = self.active().selected as isize + delta;
-        let new = s.clamp(0, len as isize - 1) as usize;
-        self.active_mut().selected = new;
+        let cur = self.active().selected;
+        let pos = visible.iter().position(|&i| i == cur).unwrap_or(0) as isize;
+        let new_pos = (pos + delta).clamp(0, visible.len() as isize - 1) as usize;
+        self.active_mut().selected = visible[new_pos];
     }
 
     /// Re-fetch the active tab's issues. Updates `last_fetched` and
@@ -210,6 +232,133 @@ impl App {
             self.detail_cache.remove(&key);
         }
     }
+
+    /// Open the `/` filter editor. Pre-loads with whatever's already
+    /// committed (so re-pressing `/` lets you refine an existing
+    /// filter without retyping). Cursor at end.
+    pub fn open_filter(&mut self) {
+        let initial = self
+            .filter
+            .as_ref()
+            .map(|f| f.buffer.clone())
+            .unwrap_or_default();
+        let cursor = initial.chars().count();
+        self.filter = Some(FilterState {
+            buffer: initial,
+            cursor,
+            editing: true,
+        });
+    }
+
+    /// Close the `/` filter editor. Mode picks whether to keep what's
+    /// typed (`Commit` — Enter) or drop it entirely (`Cancel` — Esc on
+    /// an empty filter, or two Esc's). An empty committed buffer is
+    /// treated as "no filter".
+    pub fn close_filter(&mut self, mode: FilterClose) {
+        let Some(state) = self.filter.as_mut() else {
+            return;
+        };
+        match mode {
+            FilterClose::Commit => {
+                if state.buffer.trim().is_empty() {
+                    self.filter = None;
+                } else {
+                    state.editing = false;
+                }
+            }
+            FilterClose::Cancel => {
+                self.filter = None;
+            }
+        }
+        // The committed filter may have shrunk the row list; clamp
+        // selection so it doesn't end up past the last visible row.
+        self.clamp_selection_to_filter();
+    }
+
+    /// Push a character into the filter buffer at the cursor.
+    pub fn filter_insert(&mut self, c: char) {
+        if let Some(f) = self.filter.as_mut() {
+            let byte = f
+                .buffer
+                .char_indices()
+                .nth(f.cursor)
+                .map(|(b, _)| b)
+                .unwrap_or_else(|| f.buffer.len());
+            f.buffer.insert(byte, c);
+            f.cursor += 1;
+        }
+        self.clamp_selection_to_filter();
+    }
+
+    /// Delete the character before the cursor (Backspace).
+    pub fn filter_backspace(&mut self) {
+        if let Some(f) = self.filter.as_mut()
+            && f.cursor > 0
+        {
+            let start = f
+                .buffer
+                .char_indices()
+                .nth(f.cursor - 1)
+                .map(|(b, _)| b)
+                .unwrap_or(0);
+            let end = f
+                .buffer
+                .char_indices()
+                .nth(f.cursor)
+                .map(|(b, _)| b)
+                .unwrap_or_else(|| f.buffer.len());
+            f.buffer.replace_range(start..end, "");
+            f.cursor -= 1;
+        }
+        self.clamp_selection_to_filter();
+    }
+
+    /// Return the indices of `tab.issues` that pass the current
+    /// filter, or `0..len` when there's none. Used by both the UI
+    /// (to know what to render) and the keys layer (to translate
+    /// selection navigation into raw `issues[]` indices).
+    pub fn visible_indices(&self) -> Vec<usize> {
+        let tab = self.active();
+        let Some(filter) = self.filter.as_ref() else {
+            return (0..tab.issues.len()).collect();
+        };
+        let needle = filter.buffer.to_ascii_lowercase();
+        if needle.is_empty() {
+            return (0..tab.issues.len()).collect();
+        }
+        tab.issues
+            .iter()
+            .enumerate()
+            .filter_map(|(i, issue)| {
+                let key_match = issue.key.to_ascii_lowercase().contains(&needle);
+                let summary_match = issue.fields.summary.to_ascii_lowercase().contains(&needle);
+                (key_match || summary_match).then_some(i)
+            })
+            .collect()
+    }
+
+    /// Clamp the active tab's `selected` index into the current
+    /// filtered set. If the previously-selected row is filtered out,
+    /// jumps to the first visible row.
+    fn clamp_selection_to_filter(&mut self) {
+        let visible = self.visible_indices();
+        if visible.is_empty() {
+            return;
+        }
+        let cur = self.active().selected;
+        if !visible.contains(&cur) {
+            self.active_mut().selected = visible[0];
+        }
+    }
+}
+
+/// How `close_filter` should treat the in-progress buffer.
+#[derive(Debug, Clone, Copy)]
+pub enum FilterClose {
+    /// Enter — keep what's typed (or drop to None if empty).
+    Commit,
+    /// Esc — discard whatever's typed and drop the filter entirely.
+    Cancel,
 }
 
 /// Resolve a tab's `mode = ...` into a concrete JQL string, or pass
@@ -244,4 +393,194 @@ async fn resolve_tab_jql(tab: &Tab, client: &Client) -> Result<String> {
     }
     jql.push_str(" ORDER BY rank");
     Ok(jql)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jira::{Fields, Issue};
+
+    /// Build an App skipping the async init — we don't need a real
+    /// Jira client to exercise the filter logic, just `issues` +
+    /// `selected` on a single tab.
+    fn app_with_issues(keys_and_summaries: &[(&str, &str)]) -> App {
+        let client = Client::new("https://example.atlassian.net", "x@y.z", "tok").unwrap();
+        let tab = TabState {
+            name: "Test".to_string(),
+            jql: String::new(),
+            issues: keys_and_summaries
+                .iter()
+                .map(|(k, s)| Issue {
+                    key: k.to_string(),
+                    fields: Fields {
+                        summary: s.to_string(),
+                        status: None,
+                        assignee: None,
+                        reporter: None,
+                        priority: None,
+                        issuetype: None,
+                        updated: None,
+                        created: None,
+                        fix_versions: Vec::new(),
+                    },
+                })
+                .collect(),
+            selected: 0,
+            last_fetched: None,
+            last_error: None,
+        };
+        App {
+            cfg: Config {
+                jira_url: "https://example.atlassian.net".to_string(),
+                email: "x@y.z".to_string(),
+                refresh_interval_secs: 60,
+                tabs: Vec::new(),
+            },
+            client,
+            tabs: vec![tab],
+            active_tab: 0,
+            status: String::new(),
+            details_visible: false,
+            details_scroll: 0,
+            detail_cache: HashMap::new(),
+            detail_in_flight: None,
+            filter: None,
+        }
+    }
+
+    #[test]
+    fn visible_indices_with_no_filter_returns_all() {
+        let app = app_with_issues(&[("TE-1", "alpha"), ("TE-2", "beta")]);
+        assert_eq!(app.visible_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn visible_indices_matches_summary_substring_case_insensitive() {
+        let mut app = app_with_issues(&[
+            ("TE-1", "Fix the bufferline"),
+            ("TE-2", "AI panel margin"),
+            ("TE-3", "Update README"),
+        ]);
+        app.filter = Some(FilterState {
+            buffer: "PANEL".to_string(),
+            cursor: 0,
+            editing: false,
+        });
+        assert_eq!(app.visible_indices(), vec![1]);
+    }
+
+    #[test]
+    fn visible_indices_matches_key_substring() {
+        let mut app = app_with_issues(&[("TE-1234", "a"), ("TE-1235", "b"), ("XX-9", "te-trap")]);
+        app.filter = Some(FilterState {
+            buffer: "te-1234".to_string(),
+            cursor: 0,
+            editing: false,
+        });
+        assert_eq!(app.visible_indices(), vec![0]);
+    }
+
+    #[test]
+    fn empty_filter_buffer_shows_all_issues() {
+        let mut app = app_with_issues(&[("TE-1", "alpha"), ("TE-2", "beta")]);
+        app.filter = Some(FilterState {
+            buffer: String::new(),
+            cursor: 0,
+            editing: true,
+        });
+        assert_eq!(app.visible_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn move_selection_skips_filtered_rows() {
+        let mut app = app_with_issues(&[
+            ("TE-1", "alpha"),
+            ("TE-2", "hidden"),
+            ("TE-3", "gamma"),
+            ("TE-4", "omega"),
+        ]);
+        app.filter = Some(FilterState {
+            buffer: "a".to_string(), // matches alpha (0), gamma (2), omega (3)
+            cursor: 0,
+            editing: false,
+        });
+        assert_eq!(app.visible_indices(), vec![0, 2, 3]);
+        // Start at 0 (alpha); j → 2 (gamma) — skips 1 (hidden).
+        app.move_selection(1);
+        assert_eq!(app.tabs[0].selected, 2);
+        // j → 3 (omega).
+        app.move_selection(1);
+        assert_eq!(app.tabs[0].selected, 3);
+        // j at the end clamps.
+        app.move_selection(1);
+        assert_eq!(app.tabs[0].selected, 3);
+    }
+
+    #[test]
+    fn close_filter_commit_with_empty_buffer_drops_to_none() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.open_filter();
+        app.close_filter(FilterClose::Commit);
+        assert!(app.filter.is_none());
+    }
+
+    #[test]
+    fn close_filter_commit_keeps_non_empty_buffer_committed() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.open_filter();
+        app.filter_insert('a');
+        app.close_filter(FilterClose::Commit);
+        let f = app.filter.expect("commit should keep a non-empty filter");
+        assert_eq!(f.buffer, "a");
+        assert!(!f.editing);
+    }
+
+    #[test]
+    fn close_filter_cancel_always_drops() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.open_filter();
+        app.filter_insert('x');
+        app.close_filter(FilterClose::Cancel);
+        assert!(app.filter.is_none());
+    }
+
+    #[test]
+    fn filter_insert_then_backspace_round_trips() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.open_filter();
+        app.filter_insert('a');
+        app.filter_insert('b');
+        app.filter_insert('c');
+        let f = app.filter.as_ref().unwrap();
+        assert_eq!(f.buffer, "abc");
+        assert_eq!(f.cursor, 3);
+        app.filter_backspace();
+        let f = app.filter.as_ref().unwrap();
+        assert_eq!(f.buffer, "ab");
+        assert_eq!(f.cursor, 2);
+    }
+
+    #[test]
+    fn typing_into_filter_clamps_selection_to_filtered_set() {
+        let mut app = app_with_issues(&[("TE-1", "alpha"), ("TE-2", "beta")]);
+        app.tabs[0].selected = 1; // on "beta"
+        app.open_filter();
+        // Type `a` — matches both "alpha" (key TE-1) and "beta" (key
+        // is TE-2, but `a` ALSO matches "alpha" not "beta", so
+        // visible should be just [0]). Selection should jump to 0.
+        app.filter_insert('a');
+        // Wait — `beta` contains `a`. Filter is summary substring
+        // match — both alpha and beta match `a`. Selection should
+        // stay where it is (1) since it's still in the filtered set.
+        assert_eq!(app.visible_indices(), vec![0, 1]);
+        assert_eq!(app.tabs[0].selected, 1);
+
+        // Now type `lph` (so buffer = "alph"). Only alpha matches.
+        app.filter_insert('l');
+        app.filter_insert('p');
+        app.filter_insert('h');
+        assert_eq!(app.visible_indices(), vec![0]);
+        // Selection clamps from 1 (beta, no longer visible) to 0.
+        assert_eq!(app.tabs[0].selected, 0);
+    }
 }

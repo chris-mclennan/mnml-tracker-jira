@@ -283,12 +283,14 @@ fn draw_filter_strip(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    let hint = if app.transition_picker.is_some() {
+    let hint = if app.comment_editor.is_some() {
+        " typing comment · Ctrl+S send · Esc cancel · Enter newline "
+    } else if app.transition_picker.is_some() {
         " 1-9 jump · ↑↓/jk move · Enter commit · Esc cancel "
     } else if app.filter.as_ref().map(|f| f.editing).unwrap_or(false) {
         " type to filter · Enter commit · Esc cancel "
     } else if app.details_visible {
-        " ↑↓/jk move · Ctrl+u/d scroll · d/Esc close · / filter · t move · w watch · r refresh · o open · q quit "
+        " ↑↓/jk · Ctrl+u/d scroll · d close · c comment · / filter · t move · w watch · r refresh · q quit "
     } else {
         " 1-9 tab · ↑↓/jk move · / filter · t move · w watch · d details · Enter/o open · r refresh · q quit "
     };
@@ -312,12 +314,27 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 /// Content is plain text — ADF formatting is stripped to a
 /// single-style paragraph (see `jira::adf_to_text`).
 fn draw_details(f: &mut Frame, area: Rect, app: &App) {
+    // Reserve a bottom strip for the comment editor when open.
+    let (detail_area, editor_area) = if app.comment_editor.is_some() {
+        let editor_h = 8u16.min(area.height.saturating_sub(4));
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(editor_h)])
+            .split(area);
+        (parts[0], Some(parts[1]))
+    } else {
+        (area, None)
+    };
+
     let tab = app.active();
     let Some(issue) = tab.issues.get(tab.selected) else {
         let p = Paragraph::new("(no ticket focused)")
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title(" detail "));
-        f.render_widget(p, area);
+        f.render_widget(p, detail_area);
+        if let Some(ea) = editor_area {
+            draw_comment_editor(f, ea, app);
+        }
         return;
     };
     let key = &issue.key;
@@ -479,6 +496,102 @@ fn draw_details(f: &mut Frame, area: Rect, app: &App) {
     let p = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" detail "))
         .scroll((scroll, 0));
+    f.render_widget(p, detail_area);
+    if let Some(ea) = editor_area {
+        draw_comment_editor(f, ea, app);
+    }
+}
+
+/// Inline comment editor docked at the bottom of the detail panel.
+/// Shows the buffer text, a cursor block, an error line if posting
+/// failed, and a hint row.
+fn draw_comment_editor(f: &mut Frame, area: Rect, app: &App) {
+    let Some(editor) = app.comment_editor.as_ref() else {
+        return;
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    // Render the buffer line by line. The cursor block sits at the
+    // (row, col) corresponding to `editor.cursor` chars into the buffer.
+    let chars: Vec<char> = editor.buffer.chars().collect();
+    let cursor = editor.cursor.min(chars.len());
+    let mut row = 0usize;
+    let mut col = 0usize;
+    let mut row_buf = String::new();
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+    for (i, &c) in chars.iter().enumerate() {
+        if i == cursor {
+            cursor_row = row;
+            cursor_col = col;
+        }
+        if c == '\n' {
+            lines.push(Line::from(row_buf.clone()));
+            row_buf.clear();
+            row += 1;
+            col = 0;
+        } else {
+            row_buf.push(c);
+            col += 1;
+        }
+    }
+    if cursor == chars.len() {
+        cursor_row = row;
+        cursor_col = col;
+    }
+    // Add the trailing line (with the cursor block appended if it's
+    // at end-of-row).
+    if cursor_row == row {
+        row_buf.insert(cursor_col, '│');
+        lines.push(Line::from(row_buf));
+    } else {
+        lines.push(Line::from(row_buf));
+    }
+    // If cursor is on an earlier row, re-render that row with the
+    // cursor block injected. (We've already pushed it; replace.)
+    if cursor_row < row && cursor_row < lines.len() {
+        let mut s: String = chars
+            .iter()
+            .take(cursor)
+            .rev()
+            .take_while(|&&c| c != '\n')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let tail: String = chars
+            .iter()
+            .skip(cursor)
+            .take_while(|&&c| c != '\n')
+            .collect();
+        s.push('│');
+        s.push_str(&tail);
+        lines[cursor_row] = Line::from(s);
+    }
+    if let Some(err) = editor.error.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!("error: {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    let hint = if editor.posting {
+        "posting…"
+    } else if editor.buffer.trim().is_empty() {
+        "type a comment · Esc cancel"
+    } else {
+        "Ctrl+S send · Esc cancel · Enter newline"
+    };
+    let title = format!(" comment on {} ", editor.key);
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_bottom(Line::from(Span::styled(
+                hint,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ))),
+    );
     f.render_widget(p, area);
 }
 

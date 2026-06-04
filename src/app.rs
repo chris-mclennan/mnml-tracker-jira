@@ -47,6 +47,22 @@ pub struct App {
     /// error (e.g. token revoked) — `w` no-ops with a status toast
     /// rather than retrying every keypress.
     pub my_account_id: Option<Result<String, String>>,
+    /// Inline comment editor at the bottom of the detail panel. Opened
+    /// by `c` when the detail panel is visible. Greedy modal — printable
+    /// keys insert, Esc cancels, Ctrl+P posts. Multi-line via Enter.
+    pub comment_editor: Option<CommentEditor>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CommentEditor {
+    /// Issue key the comment will be posted against (captured at open).
+    pub key: String,
+    pub buffer: String,
+    pub cursor: usize,
+    /// `Some(msg)` while posting; suppresses further key input and is
+    /// displayed in the editor's status row.
+    pub posting: bool,
+    pub error: Option<String>,
 }
 
 /// Modal state for the `t` transition picker.
@@ -118,6 +134,7 @@ impl App {
             filter: None,
             transition_picker: None,
             my_account_id: None,
+            comment_editor: None,
         };
         app.refresh_active().await;
         Ok(app)
@@ -449,6 +466,101 @@ impl App {
         }
     }
 
+    /// Open the inline comment editor for the focused ticket. No-op
+    /// unless the detail panel is visible — without it there'd be
+    /// nowhere to render the editor.
+    pub fn open_comment_editor(&mut self) {
+        if !self.details_visible {
+            return;
+        }
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        self.comment_editor = Some(CommentEditor {
+            key,
+            buffer: String::new(),
+            cursor: 0,
+            posting: false,
+            error: None,
+        });
+    }
+
+    pub fn close_comment_editor(&mut self) {
+        self.comment_editor = None;
+    }
+
+    pub fn comment_editor_insert(&mut self, c: char) {
+        if let Some(e) = self.comment_editor.as_mut()
+            && !e.posting
+        {
+            let byte = e
+                .buffer
+                .char_indices()
+                .nth(e.cursor)
+                .map(|(b, _)| b)
+                .unwrap_or_else(|| e.buffer.len());
+            e.buffer.insert(byte, c);
+            e.cursor += 1;
+        }
+    }
+
+    pub fn comment_editor_backspace(&mut self) {
+        if let Some(e) = self.comment_editor.as_mut()
+            && !e.posting
+            && e.cursor > 0
+        {
+            let start = e
+                .buffer
+                .char_indices()
+                .nth(e.cursor - 1)
+                .map(|(b, _)| b)
+                .unwrap_or(0);
+            let end = e
+                .buffer
+                .char_indices()
+                .nth(e.cursor)
+                .map(|(b, _)| b)
+                .unwrap_or_else(|| e.buffer.len());
+            e.buffer.replace_range(start..end, "");
+            e.cursor -= 1;
+        }
+    }
+
+    /// POST the comment to Jira. On success drops the editor, refreshes
+    /// the cached detail (so the new comment appears in the thread), and
+    /// toasts. On failure surfaces the error inside the editor + leaves
+    /// it open so the user can retry or copy the text out.
+    pub async fn submit_comment(&mut self) {
+        let Some(editor) = self.comment_editor.as_ref() else {
+            return;
+        };
+        if editor.buffer.trim().is_empty() || editor.posting {
+            return;
+        }
+        let key = editor.key.clone();
+        let body = editor.buffer.clone();
+        if let Some(e) = self.comment_editor.as_mut() {
+            e.posting = true;
+            e.error = None;
+        }
+        match self.client.post_comment(&key, &body).await {
+            Ok(()) => {
+                self.comment_editor = None;
+                self.status = format!("commented on {key}");
+                self.detail_cache.remove(&key);
+                if self.details_visible {
+                    self.ensure_focused_detail().await;
+                }
+            }
+            Err(e) => {
+                if let Some(ed) = self.comment_editor.as_mut() {
+                    ed.posting = false;
+                    ed.error = Some(e.to_string());
+                }
+            }
+        }
+    }
+
     /// Toggle watch state on the focused ticket. Direction is
     /// derived from `detail.watching` — needs the detail cached
     /// (force-fetches if not), so the toggle reflects the current
@@ -652,6 +764,7 @@ mod tests {
             filter: None,
             transition_picker: None,
             my_account_id: None,
+            comment_editor: None,
         }
     }
 

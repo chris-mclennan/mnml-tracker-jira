@@ -36,10 +36,33 @@ pub enum Action {
     TransitionCancel,
     /// `w` — toggle watch state on the focused ticket.
     ToggleWatch,
+    /// `c` — open the inline comment editor (detail panel must be open).
+    OpenCommentEditor,
+    CommentEditorInsert(char),
+    CommentEditorBackspace,
+    CommentEditorEnter,
+    CommentEditorSubmit,
+    CommentEditorCancel,
 }
 
 pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
     let m = key.modifiers;
+    // Comment editor is a greedy modal — printable text inserts.
+    // Ctrl+S posts; Esc cancels; Enter inserts a newline (multi-line).
+    if app.comment_editor.is_some() {
+        return match key.code {
+            KeyCode::Esc => Some(Action::CommentEditorCancel),
+            KeyCode::Char('s') if m.contains(KeyModifiers::CONTROL) => {
+                Some(Action::CommentEditorSubmit)
+            }
+            KeyCode::Enter => Some(Action::CommentEditorEnter),
+            KeyCode::Backspace => Some(Action::CommentEditorBackspace),
+            KeyCode::Char(c) if !m.contains(KeyModifiers::CONTROL) => {
+                Some(Action::CommentEditorInsert(c))
+            }
+            _ => None,
+        };
+    }
     // Transition picker is a greedy modal — its keys win first.
     if app.transition_picker.is_some() {
         return match key.code {
@@ -109,6 +132,9 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('t') => Some(Action::OpenTransitionPicker),
         // `w` toggles watch on the focused ticket.
         KeyCode::Char('w') => Some(Action::ToggleWatch),
+        // `c` opens the inline comment editor (only meaningful when the
+        // detail panel is already visible).
+        KeyCode::Char('c') if app.details_visible => Some(Action::OpenCommentEditor),
         // `d` (lowercase, no modifiers) toggles the detail pane.
         // Ctrl+d above takes precedence for scroll-down.
         KeyCode::Char('d') => Some(Action::ToggleDetails),
@@ -190,6 +216,12 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
         Action::TransitionCommit => app.commit_transition().await,
         Action::TransitionCancel => app.close_transition_picker(),
         Action::ToggleWatch => app.toggle_watch().await,
+        Action::OpenCommentEditor => app.open_comment_editor(),
+        Action::CommentEditorInsert(c) => app.comment_editor_insert(c),
+        Action::CommentEditorBackspace => app.comment_editor_backspace(),
+        Action::CommentEditorEnter => app.comment_editor_insert('\n'),
+        Action::CommentEditorSubmit => app.submit_comment().await,
+        Action::CommentEditorCancel => app.close_comment_editor(),
     }
     // After a navigation action, if the focused key changed and the
     // detail pane is open, fetch the new ticket's detail. Reset the

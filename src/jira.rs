@@ -211,6 +211,33 @@ impl Client {
         Ok(raw.account_id)
     }
 
+    /// POST a plain-text comment to `key`. The body gets wrapped in
+    /// the minimal ADF JSON the v3 API requires — one paragraph per
+    /// line in `text`, blank lines become empty paragraphs.
+    pub async fn post_comment(&self, key: &str, text: &str) -> Result<()> {
+        let url = format!("{}/rest/api/3/issue/{key}/comment", self.base);
+        let body = serde_json::json!({
+            "body": plain_to_adf(text),
+        });
+        let resp = self
+            .http
+            .post(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("posting comment on {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira comment post failed for {key}: {status}: {text}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Fire a workflow transition by id. Returns `Ok(())` on success
     /// (Jira returns 204 No Content on a successful transition).
     pub async fn run_transition(&self, key: &str, transition_id: &str) -> Result<()> {
@@ -390,6 +417,31 @@ struct CommentRaw {
     body: Option<serde_json::Value>,
 }
 
+/// Plain text → minimal ADF JSON. Inverse of [`adf_to_text`]; used
+/// when posting comments back to Jira. One paragraph per non-empty
+/// input line; blank lines pass through as empty paragraphs so the
+/// reader sees the same visual break.
+pub(crate) fn plain_to_adf(text: &str) -> serde_json::Value {
+    let paragraphs: Vec<serde_json::Value> = text
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                serde_json::json!({ "type": "paragraph" })
+            } else {
+                serde_json::json!({
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": line }]
+                })
+            }
+        })
+        .collect();
+    serde_json::json!({
+        "type": "doc",
+        "version": 1,
+        "content": paragraphs,
+    })
+}
+
 /// Atlassian Document Format → plain text. ADF is a recursive JSON
 /// tree with `type` + `content` arrays + leaf `text` nodes. We walk
 /// the tree, concatenate `text` values, and emit newlines for the
@@ -565,5 +617,43 @@ mod tests {
     fn adf_to_text_on_empty_doc_returns_empty() {
         let doc = json!({});
         assert_eq!(adf_to_text(&doc), "");
+    }
+
+    #[test]
+    fn plain_to_adf_wraps_single_line() {
+        let doc = plain_to_adf("hello");
+        assert_eq!(doc["type"], "doc");
+        assert_eq!(doc["version"], 1);
+        assert_eq!(doc["content"][0]["type"], "paragraph");
+        assert_eq!(doc["content"][0]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn plain_to_adf_one_paragraph_per_line() {
+        let doc = plain_to_adf("first\nsecond\nthird");
+        let paragraphs = doc["content"].as_array().unwrap();
+        assert_eq!(paragraphs.len(), 3);
+        assert_eq!(paragraphs[0]["content"][0]["text"], "first");
+        assert_eq!(paragraphs[1]["content"][0]["text"], "second");
+        assert_eq!(paragraphs[2]["content"][0]["text"], "third");
+    }
+
+    #[test]
+    fn plain_to_adf_blank_lines_become_empty_paragraphs() {
+        let doc = plain_to_adf("a\n\nb");
+        let paragraphs = doc["content"].as_array().unwrap();
+        assert_eq!(paragraphs.len(), 3);
+        assert_eq!(paragraphs[1]["type"], "paragraph");
+        assert!(paragraphs[1].get("content").is_none());
+    }
+
+    #[test]
+    fn plain_to_adf_then_adf_to_text_round_trips() {
+        let original = "hello world\nsecond line\nthird";
+        let doc = plain_to_adf(original);
+        let back = adf_to_text(&doc);
+        // adf_to_text emits a trailing newline after each block;
+        // trim for comparison.
+        assert_eq!(back.trim_end(), original);
     }
 }

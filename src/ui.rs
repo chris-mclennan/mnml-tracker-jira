@@ -101,6 +101,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.transition_picker.is_some() {
         draw_transition_picker(f, size, app);
     }
+    if app.field_picker.is_some() {
+        draw_field_picker(f, size, app);
+    }
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
@@ -296,16 +299,18 @@ fn draw_filter_strip(f: &mut Frame, area: Rect, app: &App) {
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let hint = if app.comment_editor.is_some() {
         " typing comment · Ctrl+S send · Esc cancel · Enter newline "
+    } else if app.field_picker.is_some() {
+        " type to filter · ↑↓ move · Enter commit · Esc cancel "
     } else if app.transition_picker.is_some() {
         " 1-9 jump · ↑↓/jk move · Enter commit · Esc cancel "
     } else if app.filter.as_ref().map(|f| f.editing).unwrap_or(false) {
         " type to filter · Enter commit · Esc cancel "
     } else if app.details_visible {
-        " ↑↓ · Ctrl+u/d scroll · d close · c comment · Space pick · / filter · t move · w watch · r · q "
+        " d close · c comment · a assignee · f version · t move · w watch · Space pick · / filter · q "
     } else if !app.selection.is_empty() {
-        " ↑↓ · Space pick · t move all · Esc clear · / filter · d details · r refresh · q quit "
+        " ↑↓ · Space pick · t move · a assignee · f version · Esc clear · / filter · q "
     } else {
-        " 1-9 tab · ↑↓ · / filter · Space pick · t move · w watch · d details · Enter/o open · r · q "
+        " 1-9 · ↑↓ · / filter · Space pick · t move · a assignee · f version · w watch · d details · q "
     };
     let line = Line::from(vec![
         Span::styled(
@@ -699,6 +704,118 @@ fn draw_transition_picker(f: &mut Frame, screen: Rect, app: &App) {
     };
 
     // Clear the cells underneath so the table doesn't bleed through.
+    f.render_widget(Clear, area);
+    let p = Paragraph::new(body).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().bg(Color::Black))
+            .title(title),
+    );
+    f.render_widget(p, area);
+}
+
+/// Modal overlay listing assignable users (`a`) or fixVersions (`f`).
+/// Type-to-filter editor at the top, filtered list below, hint row at
+/// the bottom. Centered on the screen, opaque.
+fn draw_field_picker(f: &mut Frame, screen: Rect, app: &App) {
+    let Some(picker) = app.field_picker.as_ref() else {
+        return;
+    };
+    let w = 60.min(screen.width.saturating_sub(4));
+    let h = 18.min(screen.height.saturating_sub(4));
+    let x = (screen.width.saturating_sub(w)) / 2;
+    let y = (screen.height.saturating_sub(h)) / 2;
+    let area = Rect::new(x, y, w, h);
+
+    let field_label = match picker.kind {
+        crate::app::FieldKind::Assignee => "assignee",
+        crate::app::FieldKind::FixVersion => "fixVersion",
+    };
+    let target_count = if app.selection.is_empty() {
+        1
+    } else {
+        app.selection.len()
+    };
+    let title = if target_count == 1 {
+        format!(" set {field_label} ")
+    } else {
+        format!(" set {field_label} × {target_count} ")
+    };
+
+    let mut body: Vec<Line> = Vec::new();
+    // Filter line — `/<buffer>│`.
+    let chars: Vec<char> = picker.filter.chars().collect();
+    let cursor = picker.cursor.min(chars.len());
+    let head: String = chars[..cursor].iter().collect();
+    let tail: String = chars[cursor..].iter().collect();
+    body.push(Line::from(vec![
+        Span::styled("  /", Style::default().fg(Color::Cyan)),
+        Span::styled(head, Style::default().fg(Color::White)),
+        Span::styled("│", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            tail,
+            Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+        ),
+    ]));
+    body.push(Line::from(""));
+
+    if !picker.loaded {
+        body.push(Line::from(Span::styled(
+            "  loading…",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let visible = picker.visible_indices();
+        if visible.is_empty() {
+            body.push(Line::from(Span::styled(
+                "  (no matches)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            // Window the visible items around the selection — paint
+            // up to (area_rows - 5) rows so the hint + filter fit.
+            let row_cap = h.saturating_sub(5) as usize;
+            let sel_pos = visible
+                .iter()
+                .position(|&i| i == picker.selected)
+                .unwrap_or(0);
+            let start = sel_pos.saturating_sub(row_cap / 2);
+            let end = (start + row_cap).min(visible.len());
+            for &idx in &visible[start..end] {
+                let (_, label) = &picker.items[idx];
+                let style = if idx == picker.selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let prefix = if idx == picker.selected {
+                    "  ▸ "
+                } else {
+                    "    "
+                };
+                body.push(Line::from(Span::styled(format!("{prefix}{label}"), style)));
+            }
+        }
+    }
+
+    if let Some(err) = picker.error.as_ref() {
+        body.push(Line::from(""));
+        body.push(Line::from(Span::styled(
+            format!("  error: {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        "  type to filter · ↑↓ move · Enter commit · Esc cancel",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    )));
+
     f.render_widget(Clear, area);
     let p = Paragraph::new(body).block(
         Block::default()

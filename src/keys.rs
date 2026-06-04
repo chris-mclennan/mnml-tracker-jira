@@ -47,6 +47,15 @@ pub enum Action {
     ToggleSelection,
     /// Clear the multi-selection (part of the Esc cascade).
     ClearSelection,
+    /// `a` — open assignee picker; `f` — open fixVersion picker.
+    OpenAssigneePicker,
+    OpenFixVersionPicker,
+    FieldPickerInsert(char),
+    FieldPickerBackspace,
+    FieldPickerUp,
+    FieldPickerDown,
+    FieldPickerCommit,
+    FieldPickerCancel,
 }
 
 pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
@@ -63,6 +72,22 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
             KeyCode::Backspace => Some(Action::CommentEditorBackspace),
             KeyCode::Char(c) if !m.contains(KeyModifiers::CONTROL) => {
                 Some(Action::CommentEditorInsert(c))
+            }
+            _ => None,
+        };
+    }
+    // Field picker (assignee / fixVersion) — greedy modal with a
+    // type-to-filter editor + arrow navigation. Comes before the
+    // transition picker so they don't collide on overlapping chords.
+    if app.field_picker.is_some() {
+        return match key.code {
+            KeyCode::Esc => Some(Action::FieldPickerCancel),
+            KeyCode::Enter => Some(Action::FieldPickerCommit),
+            KeyCode::Up => Some(Action::FieldPickerUp),
+            KeyCode::Down => Some(Action::FieldPickerDown),
+            KeyCode::Backspace => Some(Action::FieldPickerBackspace),
+            KeyCode::Char(c) if !m.contains(KeyModifiers::CONTROL) => {
+                Some(Action::FieldPickerInsert(c))
             }
             _ => None,
         };
@@ -142,6 +167,10 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
         // Space toggles the focused row into the bulk-selection set;
         // any subsequent `t` operates on the whole set.
         KeyCode::Char(' ') => Some(Action::ToggleSelection),
+        // `a` opens the assignee picker; `f` the fixVersion picker.
+        // Both work on selection if non-empty, else focused row.
+        KeyCode::Char('a') => Some(Action::OpenAssigneePicker),
+        KeyCode::Char('f') => Some(Action::OpenFixVersionPicker),
         // `d` (lowercase, no modifiers) toggles the detail pane.
         // Ctrl+d above takes precedence for scroll-down.
         KeyCode::Char('d') => Some(Action::ToggleDetails),
@@ -231,6 +260,14 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
         Action::CommentEditorCancel => app.close_comment_editor(),
         Action::ToggleSelection => app.toggle_selection(),
         Action::ClearSelection => app.clear_selection(),
+        Action::OpenAssigneePicker => app.open_assignee_picker().await,
+        Action::OpenFixVersionPicker => app.open_fix_version_picker().await,
+        Action::FieldPickerInsert(c) => app.field_picker_filter_insert(c),
+        Action::FieldPickerBackspace => app.field_picker_filter_backspace(),
+        Action::FieldPickerUp => app.field_picker_move(-1),
+        Action::FieldPickerDown => app.field_picker_move(1),
+        Action::FieldPickerCommit => app.commit_field_picker().await,
+        Action::FieldPickerCancel => app.close_field_picker(),
     }
     // After a navigation action, if the focused key changed and the
     // detail pane is open, fetch the new ticket's detail. Reset the

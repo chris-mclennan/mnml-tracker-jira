@@ -57,6 +57,51 @@ pub struct App {
     /// focused row. Cleared via Esc (after filter / detail / editor in
     /// the cascade).
     pub selection: BTreeSet<String>,
+    /// `a` (assignee) / `f` (fixVersion) inline-edit modal. Holds the
+    /// kind, the fetched item list, a substring filter, and a highlight
+    /// position. Greedy modal — printable text refines the filter,
+    /// Enter commits, Esc cancels.
+    pub field_picker: Option<FieldPicker>,
+}
+
+/// Inline-edit picker for one of two fields. The mechanics are
+/// identical (item list, filter, highlight, Enter to commit) — only
+/// the source data + the commit handler differ.
+#[derive(Debug, Clone)]
+pub struct FieldPicker {
+    pub kind: FieldKind,
+    /// `(id, label)` tuples. For Assignee, id = accountId, label =
+    /// display name. For FixVersion, id = name (Jira accepts versions
+    /// by name for the PUT), label = name.
+    pub items: Vec<(String, String)>,
+    /// `None` while the fetch is in flight; `Some(Vec)` once loaded.
+    pub loaded: bool,
+    pub filter: String,
+    pub cursor: usize,
+    pub selected: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    Assignee,
+    FixVersion,
+}
+
+impl FieldPicker {
+    /// Indices of `items` matching the current filter (case-insensitive
+    /// substring against label). Empty filter ⇒ all items.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let needle = self.filter.to_ascii_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, label))| label.to_ascii_lowercase().contains(&needle).then_some(i))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -142,6 +187,7 @@ impl App {
             my_account_id: None,
             comment_editor: None,
             selection: BTreeSet::new(),
+            field_picker: None,
         };
         app.refresh_active().await;
         Ok(app)
@@ -407,6 +453,17 @@ impl App {
     }
 }
 
+/// Project key for an issue key like `TE-1234` ⇒ `TE`.
+fn project_of(issue_key: &str) -> Option<String> {
+    let mut parts = issue_key.splitn(2, '-');
+    let project = parts.next()?;
+    if project.is_empty() {
+        None
+    } else {
+        Some(project.to_string())
+    }
+}
+
 /// How `close_filter` should treat the in-progress buffer.
 #[derive(Debug, Clone, Copy)]
 pub enum FilterClose {
@@ -470,6 +527,227 @@ impl App {
             && idx < list.len()
         {
             p.selected = idx;
+        }
+    }
+
+    /// Open the assignee picker against the focused issue's project.
+    /// Pre-fetches the assignable user list — empty query returns the
+    /// first page; in-modal typing can re-query for longer lists.
+    pub async fn open_assignee_picker(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        let Some(project) = project_of(&key) else {
+            self.status = format!("can't derive project from {key}");
+            return;
+        };
+        self.field_picker = Some(FieldPicker {
+            kind: FieldKind::Assignee,
+            items: Vec::new(),
+            loaded: false,
+            filter: String::new(),
+            cursor: 0,
+            selected: 0,
+            error: None,
+        });
+        match self.client.fetch_assignable_users(&project, "").await {
+            Ok(users) => {
+                let items: Vec<(String, String)> = std::iter::once((
+                    String::new(), // sentinel for "unassign"
+                    "— Unassign —".to_string(),
+                ))
+                .chain(
+                    users
+                        .into_iter()
+                        .filter(|u| !u.account_id.is_empty())
+                        .map(|u| (u.account_id, u.display_name)),
+                )
+                .collect();
+                if let Some(p) = self.field_picker.as_mut() {
+                    p.items = items;
+                    p.loaded = true;
+                }
+            }
+            Err(e) => {
+                if let Some(p) = self.field_picker.as_mut() {
+                    p.error = Some(e.to_string());
+                    p.loaded = true;
+                }
+            }
+        }
+    }
+
+    /// Open the fixVersion picker. v1 sets a single version (overwrites
+    /// whatever was there) — multi-version editing can come later.
+    pub async fn open_fix_version_picker(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        let Some(project) = project_of(&key) else {
+            self.status = format!("can't derive project from {key}");
+            return;
+        };
+        self.field_picker = Some(FieldPicker {
+            kind: FieldKind::FixVersion,
+            items: Vec::new(),
+            loaded: false,
+            filter: String::new(),
+            cursor: 0,
+            selected: 0,
+            error: None,
+        });
+        match self.client.fetch_versions(&project).await {
+            Ok(versions) => {
+                let items: Vec<(String, String)> =
+                    std::iter::once((String::new(), "— Clear fixVersion —".to_string()))
+                        .chain(versions.into_iter().map(|v| {
+                            let label = if v.released {
+                                format!("{} (released)", v.name)
+                            } else {
+                                v.name.clone()
+                            };
+                            (v.name, label)
+                        }))
+                        .collect();
+                if let Some(p) = self.field_picker.as_mut() {
+                    p.items = items;
+                    p.loaded = true;
+                }
+            }
+            Err(e) => {
+                if let Some(p) = self.field_picker.as_mut() {
+                    p.error = Some(e.to_string());
+                    p.loaded = true;
+                }
+            }
+        }
+    }
+
+    pub fn close_field_picker(&mut self) {
+        self.field_picker = None;
+    }
+
+    pub fn field_picker_filter_insert(&mut self, c: char) {
+        if let Some(p) = self.field_picker.as_mut() {
+            let byte = p
+                .filter
+                .char_indices()
+                .nth(p.cursor)
+                .map(|(b, _)| b)
+                .unwrap_or_else(|| p.filter.len());
+            p.filter.insert(byte, c);
+            p.cursor += 1;
+            // Keep highlight inside the filtered set.
+            let visible = p.visible_indices();
+            if !visible.is_empty() && !visible.contains(&p.selected) {
+                p.selected = visible[0];
+            }
+        }
+    }
+
+    pub fn field_picker_filter_backspace(&mut self) {
+        if let Some(p) = self.field_picker.as_mut()
+            && p.cursor > 0
+        {
+            let start = p
+                .filter
+                .char_indices()
+                .nth(p.cursor - 1)
+                .map(|(b, _)| b)
+                .unwrap_or(0);
+            let end = p
+                .filter
+                .char_indices()
+                .nth(p.cursor)
+                .map(|(b, _)| b)
+                .unwrap_or_else(|| p.filter.len());
+            p.filter.replace_range(start..end, "");
+            p.cursor -= 1;
+        }
+    }
+
+    pub fn field_picker_move(&mut self, delta: isize) {
+        if let Some(p) = self.field_picker.as_mut() {
+            let visible = p.visible_indices();
+            if visible.is_empty() {
+                return;
+            }
+            let pos = visible.iter().position(|&i| i == p.selected).unwrap_or(0) as isize;
+            let new_pos = (pos + delta).clamp(0, visible.len() as isize - 1) as usize;
+            p.selected = visible[new_pos];
+        }
+    }
+
+    /// Commit the field picker against the focused ticket (or the
+    /// whole selection if non-empty). Same bulk-aware shape as
+    /// `commit_transition`.
+    pub async fn commit_field_picker(&mut self) {
+        let Some(picker) = self.field_picker.as_ref() else {
+            return;
+        };
+        if !picker.loaded {
+            return;
+        }
+        let Some((id, label)) = picker.items.get(picker.selected).cloned() else {
+            return;
+        };
+        let kind = picker.kind;
+        let keys: Vec<String> = if self.selection.is_empty() {
+            self.focused_key().into_iter().collect()
+        } else {
+            self.selection.iter().cloned().collect()
+        };
+        if keys.is_empty() {
+            return;
+        }
+        let mut ok = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for key in &keys {
+            let result = match kind {
+                FieldKind::Assignee => {
+                    let account = if id.is_empty() {
+                        None
+                    } else {
+                        Some(id.as_str())
+                    };
+                    self.client.set_assignee(key, account).await
+                }
+                FieldKind::FixVersion => {
+                    let versions: Vec<String> = if id.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![id.clone()]
+                    };
+                    self.client.set_fix_versions(key, &versions).await
+                }
+            };
+            match result {
+                Ok(()) => {
+                    ok += 1;
+                    self.detail_cache.remove(key);
+                }
+                Err(e) => errors.push(format!("{key}: {e}")),
+            }
+        }
+        if errors.is_empty() {
+            self.field_picker = None;
+            let field = match kind {
+                FieldKind::Assignee => "assignee",
+                FieldKind::FixVersion => "fixVersion",
+            };
+            self.status = format!("{} ticket(s) · {field} = {label}", ok);
+            self.selection.clear();
+        } else if let Some(p) = self.field_picker.as_mut() {
+            p.error = Some(format!(
+                "{} ok · {} failed — {}",
+                ok,
+                errors.len(),
+                errors.join(" / ")
+            ));
+        }
+        self.refresh_active().await;
+        if self.details_visible {
+            self.ensure_focused_detail().await;
         }
     }
 
@@ -871,6 +1149,7 @@ mod tests {
             my_account_id: None,
             comment_editor: None,
             selection: BTreeSet::new(),
+            field_picker: None,
         }
     }
 

@@ -211,6 +211,141 @@ impl Client {
         Ok(raw.account_id)
     }
 
+    /// Fetch users assignable to `project_key`, narrowed by `query`
+    /// (Jira does the substring match server-side). Used by the `a`
+    /// assignee picker — pre-fetched on first open per-project, then
+    /// re-queried as the user types if more than a small page is
+    /// available.
+    pub async fn fetch_assignable_users(
+        &self,
+        project_key: &str,
+        query: &str,
+    ) -> Result<Vec<User>> {
+        // The `query` param is the case-insensitive substring filter;
+        // empty `query` returns the first page of all assignable users.
+        let url = format!(
+            "{}/rest/api/3/user/assignable/search?project={project_key}&query={query}&maxResults=50",
+            self.base
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .with_context(|| format!("fetching assignable users for {project_key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira assignable users fetch failed for {project_key}: {status}: {text}"
+            ));
+        }
+        let users: Vec<UserWithId> = resp
+            .json()
+            .await
+            .with_context(|| format!("parsing assignable users for {project_key}"))?;
+        Ok(users
+            .into_iter()
+            .map(|u| User {
+                display_name: u.display_name,
+                account_id: u.account_id,
+            })
+            .collect())
+    }
+
+    /// Fetch every version of `project_key` (released + unreleased,
+    /// archived skipped). Sorted by startDate desc then name — the
+    /// most-recent / next-up versions show up first.
+    pub async fn fetch_versions(&self, project_key: &str) -> Result<Vec<ProjectVersion>> {
+        let url = format!("{}/rest/api/3/project/{project_key}/versions", self.base);
+        let resp = self
+            .http
+            .get(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .with_context(|| format!("fetching versions for {project_key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira versions fetch failed for {project_key}: {status}: {text}"
+            ));
+        }
+        let mut versions: Vec<ProjectVersion> = resp
+            .json()
+            .await
+            .with_context(|| format!("parsing versions for {project_key}"))?;
+        versions.retain(|v| !v.archived);
+        // Sort by startDate descending (most recent first), then name.
+        versions.sort_by(
+            |a, b| match (a.start_date.as_deref(), b.start_date.as_deref()) {
+                (Some(x), Some(y)) => y.cmp(x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.name.cmp(&b.name),
+            },
+        );
+        Ok(versions)
+    }
+
+    /// PUT a new assignee on `key`. Empty `account_id` ⇒ unassign.
+    pub async fn set_assignee(&self, key: &str, account_id: Option<&str>) -> Result<()> {
+        let url = format!("{}/rest/api/3/issue/{key}", self.base);
+        let assignee = match account_id {
+            Some(id) => serde_json::json!({ "accountId": id }),
+            None => serde_json::Value::Null,
+        };
+        let body = serde_json::json!({ "fields": { "assignee": assignee } });
+        let resp = self
+            .http
+            .put(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("setting assignee on {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira assignee set failed for {key}: {status}: {text}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// PUT a fixVersion list on `key`. Empty Vec ⇒ clear fixVersions.
+    pub async fn set_fix_versions(&self, key: &str, version_names: &[String]) -> Result<()> {
+        let url = format!("{}/rest/api/3/issue/{key}", self.base);
+        let versions: Vec<serde_json::Value> = version_names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n }))
+            .collect();
+        let body = serde_json::json!({ "fields": { "fixVersions": versions } });
+        let resp = self
+            .http
+            .put(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("setting fixVersions on {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira fixVersions set failed for {key}: {status}: {text}"
+            ));
+        }
+        Ok(())
+    }
+
     /// POST a plain-text comment to `key`. The body gets wrapped in
     /// the minimal ADF JSON the v3 API requires — one paragraph per
     /// line in `text`, blank lines become empty paragraphs.
@@ -522,10 +657,28 @@ pub struct NamedField {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct User {
     #[serde(rename = "displayName", default)]
     pub display_name: String,
+    /// Atlassian accountId — present on `/user/assignable/search` and
+    /// `/myself` responses but not the abbreviated user objects that
+    /// appear inside `Issue.fields.assignee` etc. Empty string ⇒ not
+    /// known (e.g. a legacy email-only assignee that didn't migrate
+    /// to GDPR-mode accountIds).
+    #[serde(default, rename = "accountId")]
+    pub account_id: String,
+}
+
+/// Same shape as User but with `accountId` deserialized as the
+/// required field — the assignable-search endpoint always returns it.
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+struct UserWithId {
+    #[serde(rename = "displayName", default)]
+    display_name: String,
+    #[serde(rename = "accountId")]
+    account_id: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -534,6 +687,8 @@ pub struct ProjectVersion {
     pub name: String,
     #[serde(default)]
     pub released: bool,
+    #[serde(default)]
+    pub archived: bool,
     #[serde(default, rename = "startDate")]
     pub start_date: Option<String>,
     /// Kept for future "release date" column / filter; not yet used.

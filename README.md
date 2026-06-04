@@ -1,20 +1,28 @@
 # mnml-tickets-jira
 
 Jira ticket viewer for [mnml](https://mnml.sh) — terminal TUI with
-configurable tabs (JQL queries or auto-resolved release `fixVersion`s).
-Runs standalone or, in a follow-up, as an mnml-hosted pane.
+configurable tabs (JQL queries or auto-resolved release `fixVersion`s),
+a right-half detail panel, status transitions, inline assignee /
+fixVersion editing, comment posting, and bulk operations across
+selected rows. Runs standalone in any terminal or as a hosted
+mnml pane via the blit protocol.
 
 ```
 ┌─ tickets ────────────────────────────────────────────────────────┐
 │ ▸1.Testing (12)  2.Current (47)  3.Next (8)  4.Mobile (3)  5.Mine │
-└──────────────────────────────────────────────────────────────────┘
-┌─ Testing ────────────────────────────────────────────────────────┐
-│ KEY      STATUS    ASSIGNEE        UPDATED     SUMMARY           │
-│ TE-1234  Testing   chrismclennan   2026-06-02  Bufferline drops…│
-│ TE-1235  Testing   andrew          2026-06-01  AI panel margin…  │
-│ …                                                                │
-└──────────────────────────────────────────────────────────────────┘
-  refreshing Testing…   1-9 tab · ↑↓/jk move · Enter/o open · r refresh · q quit
+└────────┬─────────────────────────────────────────────────────────┘
+┌─ Testing─┼──────────────┐┌─ TE-1234 ★ watching (4 total) ──────┐
+│ KEY      │ STATUS  …    ││ Bug · Highest · @chrismclennan       │
+│ TE-1234▸│ Testing …    ││ fixVersion: 6.4 · reporter: andrew    │
+│ TE-1235  │ Testing …    ││                                       │
+│ TE-1241  │ Testing …    ││ When the bufferline drops a tab on   │
+│ TE-1244  │ Testing …    ││ window resize the next render panic… │
+│ …                       ││                                       │
+│                         ││ comments (3, most-recent first):     │
+│                         ││  ▸ chrismclennan · 2026-06-02         │
+│                         ││    repro on 0.1.2 too, fix forthcoming│
+└─────────────────────────┘└──────────────────────────────────────┘
+  d toggle detail · t transition · / filter · w watch · c comment · q quit
 ```
 
 ## Install
@@ -85,22 +93,101 @@ Modes:
 
 ## Keys
 
-| Chord          | Action                                       |
-|----------------|----------------------------------------------|
-| `1`-`9`        | Switch to that tab                           |
-| `Tab` / `BackTab` | Cycle tabs forward / back                  |
-| `↑` / `k`, `↓` / `j` | Move selection                          |
-| `PgUp` / `PgDn` | Jump 10 rows                                |
-| `g` / `G`      | Top / bottom                                 |
-| `Enter` / `o`  | Open focused ticket in browser               |
-| `d`            | Toggle right-half ticket detail panel        |
-| `Ctrl+u` / `Ctrl+d` | Scroll detail panel up / down (when open) |
-| `/`            | Open filter editor (substring match)         |
-| `t`            | Open status transition picker for focused ticket |
-| `w`            | Toggle watch on focused ticket               |
-| `r`            | Refresh active tab (+ detail if open)        |
-| `Esc`          | Clear filter → close detail → quit (cascade) |
-| `q` / `Ctrl+C` | Quit                                         |
+| Chord                  | Action                                             |
+|------------------------|----------------------------------------------------|
+| `1`-`9`                | Switch to that tab                                 |
+| `Tab` / `BackTab`      | Cycle tabs forward / back                          |
+| `↑` / `k`, `↓` / `j`   | Move selection                                     |
+| `PgUp` / `PgDn`        | Jump 10 rows                                       |
+| `g` / `G`              | Top / bottom                                       |
+| `Enter` / `o`          | Open focused ticket in browser                     |
+| `d`                    | Toggle right-half ticket detail panel              |
+| `Ctrl+u` / `Ctrl+d`    | Scroll detail panel up / down (when open)          |
+| `/`                    | Open filter editor (substring match)               |
+| `t`                    | Open status transition picker for focused ticket (operates on multi-selection if non-empty) |
+| `a`                    | Open assignee picker (operates on multi-selection if non-empty) |
+| `f`                    | Open fixVersion picker (operates on multi-selection if non-empty) |
+| `c`                    | Open inline comment editor (detail panel must be open) — `Ctrl+S` posts, `Esc` cancels |
+| `w`                    | Toggle watch on focused ticket                     |
+| `Space`                | Toggle focused row in multi-selection set          |
+| `r`                    | Refresh active tab (+ detail if open)              |
+| `Esc`                  | Cascade: clear selection → clear filter → close detail → quit |
+| `q` / `Ctrl+C`         | Quit                                               |
+
+### Multi-selection + bulk ops
+
+`Space` toggles the focused row into a per-tab selection set, marked
+visually in the leftmost column. With at least one row selected, `t`
+runs the chosen transition on every selected ticket (parallel, with
+error tally); `a` / `f` set the chosen assignee / fixVersion on every
+selected ticket the same way. Selection clears on tab switch and after
+a successful bulk op.
+
+### Detail panel
+
+`d` opens a right-half panel for the focused ticket: type / status /
+priority / assignee / reporter / fixVersion header (with watcher chip),
+then description, then up to the last 10 comments (most-recent first).
+The narrative content (description + comments) is lazy-loaded on first
+focus and cached per-issue key — arrow-keying through a long list only
+fetches once per ticket.
+
+`r` while the detail panel is open invalidates the cached detail for
+the focused ticket and re-fetches both the list and the narrative —
+useful after the ticket got a transition or a new comment server-side.
+
+Atlassian Document Format (Jira's rich-text JSON) is rendered as plain
+text in v1; inline marks (bold, italic, links) are stripped and block
+structure (paragraphs, bullet lists, code blocks) is preserved by
+newlines.
+
+### Status transition picker
+
+`t` opens a centered modal listing the workflow transitions available
+for the focused ticket — exactly what Jira's web UI shows in the
+"Status" dropdown, just keyboard-driven. Numbered `1`-`9` for direct
+selection, `↑↓` / `jk` to move, Enter to commit, Esc to cancel.
+
+The list is per-issue: Jira's workflow engine is graph-based, so the
+options depend on the current status (what edges leave this node) and
+your project permissions. A terminal state with no outgoing edges
+renders as `(no transitions available)` — that's normal, not a bug.
+
+On success the modal closes, the active tab refreshes (so the new
+status chip shows up in the table), and any cached ticket detail
+gets dropped so a re-fetch picks up the moved-to state. On failure
+(permission denied, validation required) the error surfaces inside
+the modal and the picker stays open.
+
+### Filter
+
+`/` opens a 1-row filter editor above the table. Substring match —
+case-insensitive — against both `KEY` and `SUMMARY`. The visible row
+count updates live as you type; `Enter` commits the filter (it stays
+applied while you scroll, switch tabs, etc.); `Esc` cancels and drops
+the filter.
+
+Selection stays consistent across filter changes: arrow-keys step
+through the *visible* rows only, and the cursor never lands on a
+filtered-out row. Tab title shows `(<visible>/<total>)` while a
+filter is active.
+
+### Inline-edit assignee / fixVersion
+
+`a` / `f` open a centered picker (type-to-filter editor + scrollable
+list) populated from the project's assignable users / unreleased
+versions respectively. Enter commits, Esc cancels. With at least one
+row in the selection set, the commit applies to every selected ticket;
+otherwise it applies to the focused row.
+
+### Inline comment posting
+
+With the detail panel open, `c` drops a one-block editor at the bottom
+of the panel. Multi-line via `Enter`. `Ctrl+S` posts via the Jira REST
+API (`POST /issue/{key}/comment`); `Esc` discards.
+
+The posted comment shows up in the detail panel as soon as the
+post-comment promise resolves — no manual refresh needed.
 
 ### Watcher toggle
 
@@ -146,92 +233,44 @@ jql  = "reporter = currentUser() ORDER BY updated DESC"
 columns = ["key", "priority", "status", "updated", "summary"]
 ```
 
-### Status transition picker
+## Two run modes
 
-`t` opens a centered modal listing the workflow transitions available
-for the focused ticket — exactly what Jira's web UI shows in the
-"Status" dropdown, just keyboard-driven. Numbered `1`-`9` for direct
-selection, `↑↓` / `jk` to move, Enter to commit, Esc to cancel.
+### Standalone
 
-The list is per-issue: Jira's workflow engine is graph-based, so the
-options depend on the current status (what edges leave this node) and
-your project permissions. A terminal state with no outgoing edges
-renders as `(no transitions available)` — that's normal, not a bug.
+```sh
+mnml-tickets-jira
+```
 
-On success the modal closes, the active tab refreshes (so the new
-status chip shows up in the table), and any cached ticket detail
-gets dropped so a re-fetch picks up the moved-to state. On failure
-(permission denied, validation required) the error surfaces inside
-the modal and the picker stays open.
+Works in any terminal. No mnml required.
 
-### Filter
+### Blit-host (hosted as an mnml pane)
 
-`/` opens a 1-row filter editor above the table. Substring match —
-case-insensitive — against both `KEY` and `SUMMARY`. The visible row
-count updates live as you type; `Enter` commits the filter (it stays
-applied while you scroll, switch tabs, etc.); `Esc` cancels and drops
-the filter.
+From inside mnml:
 
-Selection stays consistent across filter changes: arrow-keys step
-through the *visible* rows only, and the cursor never lands on a
-filtered-out row. Tab title shows `(<visible>/<total>)` while a
-filter is active.
+```vim
+:host.launch mnml-tickets-jira
+```
 
-`Esc` cascades through state when there's more than one thing to
-unwind:
+mnml spawns it with `--blit <socket>` and renders the streamed cell
+grid as a native `Pane::BlitHost`. See [Building integrations](https://mnml.sh/manual/integrations/building/)
+for the protocol details.
 
-1. If a filter is committed, Esc clears it.
-2. Otherwise, if the detail panel is open, Esc closes it.
-3. Otherwise, Esc quits the app.
+## Status
 
-So Esc-Esc-Esc safely leaves a "filter + detail + done" state.
+**v0.2** (current main + tagged release):
 
-### Detail panel
-
-`d` opens a right-half panel for the focused ticket: type / status /
-priority / assignee / reporter / fixVersion header, then description,
-then up to the last 10 comments (most-recent first). The narrative
-content (description + comments) is lazy-loaded on first focus and
-cached per-issue key — arrow-keying through a long list only fetches
-once per ticket.
-
-`r` while the detail panel is open invalidates the cached detail for
-the focused ticket and re-fetches both the list and the narrative —
-useful after the ticket got a transition or a new comment server-side.
-
-Atlassian Document Format (Jira's rich-text JSON) is rendered as plain
-text in v1; inline marks (bold, italic, links) are stripped and block
-structure (paragraphs, bullet lists, code blocks) is preserved by
-newlines.
-
-## Status & roadmap
-
-**v0.1 (this release):**
-- Standalone TUI mode
-- Configurable JQL or auto-resolved release tabs
-- 1-9 tab switching · ↑↓ navigation · open-in-browser · refresh
-
-**v0.2 (current main):**
-- Blit mode (`--blit <socket>`) — mnml / tmnl can host the binary as a pane
-- Right-half ticket detail panel (`d`) — type / status / priority /
-  assignee / reporter / fixVersion + description + last 10 comments,
-  lazy-loaded per issue key
-- Atlassian Document Format → plain text for description + comments
-- Filter editor (`/`) — substring match on key + summary,
-  case-insensitive, applies live; Esc cascade for cleanup
-- Status transition picker (`t`) — modal listing the focused
-  ticket's available workflow transitions; POSTs the chosen
-  one + refreshes the list
-- Watcher toggle (`w`) — POST/DELETE `/issue/{key}/watchers`,
-  with watcher chip on the detail panel header
-- Per-tab column override — `[[tabs]] columns = [...]` from a
-  fixed set (key, status, assignee, reporter, priority, type,
-  updated, fix_version, summary)
-
-**v0.2 is feature-complete.** Future tracks if useful:
-- bulk-transition / bulk-assign across selected rows
-- comment posting from the detail panel
-- inline-edit assignee / fixVersion
+- Standalone + blit-host modes
+- Configurable JQL or auto-resolved release tabs (`current_release`, `next_release`, optional component filter)
+- 1-9 / Tab / Enter navigation · `r` refresh · `Esc` cascade
+- `d` right-half detail panel — header + description + last 10 comments, lazy-loaded + cached per issue
+- `/` filter editor — substring on key + summary, live update, selection stays consistent
+- `t` status transition picker (single + bulk)
+- `a` / `f` assignee + fixVersion pickers (single + bulk)
+- `c` inline comment editor (`Ctrl+S` to post)
+- `w` watcher toggle with `★`/`☆` chip
+- `Space` multi-selection across rows
+- Per-tab column override
+- `--check` for resolved-config + auth verification
 
 ## License
 

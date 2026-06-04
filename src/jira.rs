@@ -101,6 +101,144 @@ impl Client {
     pub fn issue_url(&self, key: &str) -> String {
         format!("{}/browse/{key}", self.base)
     }
+
+    /// Fetch a single issue's description + comments. The fields
+    /// already on `Issue` (status, assignee, …) are included too so
+    /// the detail view can re-read updated state without a stale
+    /// pre-detail fetch. Used to populate the right-half detail
+    /// panel when an issue gets focus there.
+    pub async fn fetch_issue_detail(&self, key: &str) -> Result<IssueDetail> {
+        let url = format!(
+            "{}/rest/api/3/issue/{key}?fields=description,comment,summary,status,assignee,issuetype,priority,fixVersions,updated,reporter",
+            self.base
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .with_context(|| format!("fetching issue {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira issue fetch failed for {key}: {status}: {text}"
+            ));
+        }
+        let raw: IssueDetailRaw = resp
+            .json()
+            .await
+            .with_context(|| format!("parsing detail for {key}"))?;
+        let description = raw
+            .fields
+            .description
+            .as_ref()
+            .map(adf_to_text)
+            .filter(|s| !s.trim().is_empty());
+        let comments = raw
+            .fields
+            .comment
+            .map(|c| {
+                c.comments
+                    .into_iter()
+                    .map(|raw| Comment {
+                        author: raw.author.as_ref().map(|u| u.display_name.clone()),
+                        created: raw.created,
+                        body: raw.body.as_ref().map(adf_to_text).unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(IssueDetail {
+            description,
+            comments,
+        })
+    }
+}
+
+/// One ticket's narrative content — description + the comment thread.
+/// Lazy-loaded per-issue when the detail pane is open.
+#[derive(Debug, Clone, Default)]
+pub struct IssueDetail {
+    pub description: Option<String>,
+    pub comments: Vec<Comment>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Comment {
+    pub author: Option<String>,
+    pub created: Option<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueDetailRaw {
+    fields: IssueDetailFieldsRaw,
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueDetailFieldsRaw {
+    #[serde(default)]
+    description: Option<serde_json::Value>,
+    #[serde(default)]
+    comment: Option<CommentListRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentListRaw {
+    #[serde(default)]
+    comments: Vec<CommentRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentRaw {
+    #[serde(default)]
+    author: Option<User>,
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    body: Option<serde_json::Value>,
+}
+
+/// Atlassian Document Format → plain text. ADF is a recursive JSON
+/// tree with `type` + `content` arrays + leaf `text` nodes. We walk
+/// the tree, concatenate `text` values, and emit newlines for the
+/// block-level types we care about (`paragraph`, `heading`, `bullet`
+/// items, `code_block`). Inline formatting marks are stripped — the
+/// detail pane is plain-text only in v1.
+pub(crate) fn adf_to_text(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+    walk_adf(v, &mut out);
+    out
+}
+
+fn walk_adf(node: &serde_json::Value, out: &mut String) {
+    if let Some(s) = node.get("text").and_then(|v| v.as_str()) {
+        out.push_str(s);
+    }
+    if let Some(children) = node.get("content").and_then(|v| v.as_array()) {
+        for child in children {
+            walk_adf(child, out);
+        }
+    }
+    let kind = node.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if matches!(
+        kind,
+        "paragraph"
+            | "heading"
+            | "codeBlock"
+            | "blockquote"
+            | "rule"
+            | "listItem"
+            | "bulletList"
+            | "orderedList"
+            | "hardBreak"
+    ) && !out.ends_with('\n')
+    {
+        out.push('\n');
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,4 +299,83 @@ pub struct ProjectVersion {
     /// Kept for future "release date" column / filter; not yet used.
     #[serde(default, rename = "releaseDate")]
     pub release_date: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn adf_to_text_extracts_paragraph_text() {
+        let doc = json!({
+            "type": "doc",
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{ "type": "text", "text": "hello world" }]
+                }
+            ]
+        });
+        let out = adf_to_text(&doc);
+        assert_eq!(out.trim(), "hello world");
+    }
+
+    #[test]
+    fn adf_to_text_joins_multiple_paragraphs_with_newlines() {
+        let doc = json!({
+            "type": "doc",
+            "content": [
+                { "type": "paragraph", "content": [{ "type": "text", "text": "first" }] },
+                { "type": "paragraph", "content": [{ "type": "text", "text": "second" }] }
+            ]
+        });
+        let out = adf_to_text(&doc);
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn adf_to_text_walks_nested_marks_and_inline() {
+        let doc = json!({
+            "type": "paragraph",
+            "content": [
+                { "type": "text", "text": "bold ", "marks": [{ "type": "strong" }] },
+                { "type": "text", "text": "and " },
+                { "type": "text", "text": "italic", "marks": [{ "type": "em" }] }
+            ]
+        });
+        let out = adf_to_text(&doc);
+        assert_eq!(out.trim(), "bold and italic");
+    }
+
+    #[test]
+    fn adf_to_text_handles_bullet_list() {
+        let doc = json!({
+            "type": "bulletList",
+            "content": [
+                {
+                    "type": "listItem",
+                    "content": [
+                        { "type": "paragraph", "content": [{ "type": "text", "text": "one" }] }
+                    ]
+                },
+                {
+                    "type": "listItem",
+                    "content": [
+                        { "type": "paragraph", "content": [{ "type": "text", "text": "two" }] }
+                    ]
+                }
+            ]
+        });
+        let out = adf_to_text(&doc);
+        let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines, vec!["one", "two"]);
+    }
+
+    #[test]
+    fn adf_to_text_on_empty_doc_returns_empty() {
+        let doc = json!({});
+        assert_eq!(adf_to_text(&doc), "");
+    }
 }

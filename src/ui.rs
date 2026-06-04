@@ -79,13 +79,23 @@ pub fn draw(f: &mut Frame, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // tab strip
-            Constraint::Min(1),    // table
+            Constraint::Min(1),    // body (table + optional details)
             Constraint::Length(1), // status line
         ])
         .split(size);
 
     draw_tabs(f, chunks[0], app);
-    draw_table(f, chunks[1], app);
+    if app.details_visible {
+        // Horizontal split: 60% list, 40% detail.
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(chunks[1]);
+        draw_table(f, body[0], app);
+        draw_details(f, body[1], app);
+    } else {
+        draw_table(f, chunks[1], app);
+    }
     draw_status(f, chunks[2], app);
 }
 
@@ -210,7 +220,11 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    let hint = " 1-9 tab · ↑↓/jk move · Enter/o open · r refresh · q quit ";
+    let hint = if app.details_visible {
+        " ↑↓/jk move · Ctrl+u/d scroll detail · d/Esc close · r refresh · o open · q quit "
+    } else {
+        " 1-9 tab · ↑↓/jk move · d details · Enter/o open · r refresh · q quit "
+    };
     let line = Line::from(vec![
         Span::styled(
             format!(" {} ", app.status),
@@ -224,6 +238,169 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         ),
     ]);
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// Right-half pane: the focused ticket's summary + status / assignee /
+/// fixVersion header, then description, then the last N comments.
+/// Content is plain text — ADF formatting is stripped to a
+/// single-style paragraph (see `jira::adf_to_text`).
+fn draw_details(f: &mut Frame, area: Rect, app: &App) {
+    let tab = app.active();
+    let Some(issue) = tab.issues.get(tab.selected) else {
+        let p = Paragraph::new("(no ticket focused)")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title(" detail "));
+        f.render_widget(p, area);
+        return;
+    };
+    let key = &issue.key;
+    let summary = &issue.fields.summary;
+    let status = issue
+        .fields
+        .status
+        .as_ref()
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| "?".to_string());
+    let assignee = issue
+        .fields
+        .assignee
+        .as_ref()
+        .map(|a| a.display_name.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let reporter = issue
+        .fields
+        .reporter
+        .as_ref()
+        .map(|a| a.display_name.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let priority = issue
+        .fields
+        .priority
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let issuetype = issue
+        .fields
+        .issuetype
+        .as_ref()
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| "—".to_string());
+    let fix = if issue.fields.fix_versions.is_empty() {
+        "—".to_string()
+    } else {
+        issue
+            .fields
+            .fix_versions
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(
+                key.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(summary.clone(), Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        meta_line("type", &issuetype),
+        meta_line("status", &status),
+        meta_line("priority", &priority),
+        meta_line("assignee", &assignee),
+        meta_line("reporter", &reporter),
+        meta_line("fixVersion", &fix),
+        Line::from(""),
+    ];
+
+    // Body — description + comments, lazy-loaded.
+    if let Some(detail) = app.focused_detail() {
+        lines.push(section_header("description"));
+        match detail.description.as_deref() {
+            Some(d) if !d.trim().is_empty() => {
+                for raw in d.lines() {
+                    lines.push(Line::from(raw.to_string()));
+                }
+            }
+            _ => lines.push(Line::from(Span::styled(
+                "(no description)",
+                Style::default().fg(Color::DarkGray),
+            ))),
+        }
+        lines.push(Line::from(""));
+        lines.push(section_header(&format!(
+            "comments ({})",
+            detail.comments.len()
+        )));
+        if detail.comments.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "(no comments)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            // Show the most-recent N — Jira returns comments
+            // chronologically (oldest first), so reverse + take.
+            let take = 10.min(detail.comments.len());
+            for c in detail.comments.iter().rev().take(take) {
+                let author = c.author.as_deref().unwrap_or("?");
+                let when = c
+                    .created
+                    .as_deref()
+                    .and_then(|s| s.split('T').next())
+                    .unwrap_or("");
+                lines.push(Line::from(vec![
+                    Span::styled(author.to_string(), Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        format!("  {when}"),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
+                    ),
+                ]));
+                for raw in c.body.lines() {
+                    lines.push(Line::from(format!("  {raw}")));
+                }
+                lines.push(Line::from(""));
+            }
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "loading detail…",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let scroll = app.details_scroll;
+    let p = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" detail "))
+        .scroll((scroll, 0));
+    f.render_widget(p, area);
+}
+
+fn meta_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label:>10}: "),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn section_header(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {label} "),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// `2026-01-15T12:34:56.789+0000` → `2026-01-15`.

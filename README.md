@@ -93,8 +93,29 @@ Modes:
 | `PgUp` / `PgDn` | Jump 10 rows                                |
 | `g` / `G`      | Top / bottom                                 |
 | `Enter` / `o`  | Open focused ticket in browser               |
-| `r`            | Refresh active tab                           |
-| `q` / `Esc` / `Ctrl+C` | Quit                                |
+| `d`            | Toggle right-half ticket detail panel        |
+| `Ctrl+u` / `Ctrl+d` | Scroll detail panel up / down (when open) |
+| `r`            | Refresh active tab (+ detail if open)        |
+| `Esc`          | Close detail panel (or quit if already closed) |
+| `q` / `Ctrl+C` | Quit                                         |
+
+### Detail panel
+
+`d` opens a right-half panel for the focused ticket: type / status /
+priority / assignee / reporter / fixVersion header, then description,
+then up to the last 10 comments (most-recent first). The narrative
+content (description + comments) is lazy-loaded on first focus and
+cached per-issue key — arrow-keying through a long list only fetches
+once per ticket.
+
+`r` while the detail panel is open invalidates the cached detail for
+the focused ticket and re-fetches both the list and the narrative —
+useful after the ticket got a transition or a new comment server-side.
+
+Atlassian Document Format (Jira's rich-text JSON) is rendered as plain
+text in v1; inline marks (bold, italic, links) are stripped and block
+structure (paragraphs, bullet lists, code blocks) is preserved by
+newlines.
 
 ## Status & roadmap
 
@@ -103,9 +124,14 @@ Modes:
 - Configurable JQL or auto-resolved release tabs
 - 1-9 tab switching · ↑↓ navigation · open-in-browser · refresh
 
+**v0.2 (current main):**
+- Blit mode (`--blit <socket>`) — mnml / tmnl can host the binary as a pane
+- Right-half ticket detail panel (`d`) — type / status / priority /
+  assignee / reporter / fixVersion + description + last 10 comments,
+  lazy-loaded per issue key
+- Atlassian Document Format → plain text for description + comments
+
 **Planned:**
-- Blit mode (`--blit <socket>`) so mnml can host as a pane
-- Right-half ticket detail panel (description + comments + transitions)
 - Status transition picker (`t` opens "move to → " menu)
 - Search/filter overlay within current tab (`/`)
 - Watcher / star toggle

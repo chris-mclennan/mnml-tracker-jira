@@ -2,8 +2,9 @@
 //! each configured tab. The UI layer reads from this.
 
 use crate::config::{Config, ResolveMode, Tab};
-use crate::jira::{Client, Issue};
+use crate::jira::{Client, Issue, IssueDetail};
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 
 pub struct App {
     pub cfg: Config,
@@ -13,6 +14,19 @@ pub struct App {
     pub active_tab: usize,
     /// Toast/status line at the bottom of the screen.
     pub status: String,
+    /// When true, render a right-half detail panel for the focused
+    /// ticket. Toggled by `d`. Off by default — the table is wider.
+    pub details_visible: bool,
+    /// First-line offset into the detail body (vertical scroll within
+    /// the right panel). Reset when the focused ticket changes.
+    pub details_scroll: u16,
+    /// Cache of `(issue.key, IssueDetail)` — populated on demand when
+    /// the user focuses a ticket with the detail pane open. Survives
+    /// tab switches; cleared per-key by an explicit refresh.
+    pub detail_cache: HashMap<String, IssueDetail>,
+    /// `Some(key)` while a detail-fetch is in flight, so we don't fire
+    /// duplicate requests on rapid arrow-key navigation.
+    pub detail_in_flight: Option<String>,
 }
 
 pub struct TabState {
@@ -52,6 +66,10 @@ impl App {
             tabs,
             active_tab: 0,
             status: String::new(),
+            details_visible: false,
+            details_scroll: 0,
+            detail_cache: HashMap::new(),
+            detail_in_flight: None,
         };
         app.refresh_active().await;
         Ok(app)
@@ -121,6 +139,75 @@ impl App {
         match webbrowser::open(&url) {
             Ok(()) => self.status = format!("opened {} in browser", issue.key),
             Err(e) => self.status = format!("open failed: {e}"),
+        }
+    }
+
+    /// Toggle the right-half ticket detail panel. On first show, kicks
+    /// off a detail fetch for the focused ticket (if not already cached).
+    pub async fn toggle_details(&mut self) {
+        self.details_visible = !self.details_visible;
+        self.details_scroll = 0;
+        if self.details_visible {
+            self.ensure_focused_detail().await;
+        }
+    }
+
+    /// Issue key of the currently-focused ticket, or `None` if the
+    /// active tab is empty.
+    pub fn focused_key(&self) -> Option<String> {
+        self.active()
+            .issues
+            .get(self.active().selected)
+            .map(|i| i.key.clone())
+    }
+
+    /// Borrow the detail for the focused ticket, if cached.
+    pub fn focused_detail(&self) -> Option<&IssueDetail> {
+        let key = self
+            .active()
+            .issues
+            .get(self.active().selected)?
+            .key
+            .clone();
+        self.detail_cache.get(&key)
+    }
+
+    /// Fetch the focused ticket's description + comments if we don't
+    /// already have them cached. No-op when the focused row is empty
+    /// or another fetch is in flight.
+    pub async fn ensure_focused_detail(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        if self.detail_cache.contains_key(&key) {
+            return;
+        }
+        if self.detail_in_flight.as_deref() == Some(&key) {
+            return;
+        }
+        self.detail_in_flight = Some(key.clone());
+        match self.client.fetch_issue_detail(&key).await {
+            Ok(detail) => {
+                self.detail_cache.insert(key, detail);
+            }
+            Err(e) => {
+                // Park an error placeholder so we don't refetch on
+                // every key event. User-facing message in the status
+                // line.
+                self.status = format!("detail fetch failed for {key}: {e}");
+                self.detail_cache.insert(key, IssueDetail::default());
+            }
+        }
+        self.detail_in_flight = None;
+    }
+
+    /// Drop the cached detail for the focused ticket so the next
+    /// `ensure_focused_detail` call re-fetches. Used by `r` when the
+    /// detail panel is visible — the list refresh would otherwise
+    /// leave stale narrative content.
+    pub fn invalidate_focused_detail(&mut self) {
+        if let Some(key) = self.focused_key() {
+            self.detail_cache.remove(&key);
         }
     }
 }

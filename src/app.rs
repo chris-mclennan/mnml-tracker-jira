@@ -4,7 +4,7 @@
 use crate::config::{Config, ResolveMode, Tab};
 use crate::jira::{Client, Issue, IssueDetail, Transition};
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 pub struct App {
     pub cfg: Config,
@@ -51,6 +51,12 @@ pub struct App {
     /// by `c` when the detail panel is visible. Greedy modal — printable
     /// keys insert, Esc cancels, Ctrl+P posts. Multi-line via Enter.
     pub comment_editor: Option<CommentEditor>,
+    /// Multi-row selection set — issue keys (not indices) so a refresh
+    /// can't invalidate it. `Space` toggles the focused row; `t` and
+    /// `w` operate on the whole set when non-empty, otherwise just the
+    /// focused row. Cleared via Esc (after filter / detail / editor in
+    /// the cascade).
+    pub selection: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,6 +141,7 @@ impl App {
             transition_picker: None,
             my_account_id: None,
             comment_editor: None,
+            selection: BTreeSet::new(),
         };
         app.refresh_active().await;
         Ok(app)
@@ -466,6 +473,33 @@ impl App {
         }
     }
 
+    /// Toggle the focused ticket's key in the selection set.
+    pub fn toggle_selection(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        if !self.selection.remove(&key) {
+            self.selection.insert(key);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// The set of keys a bulk operation should run against — the
+    /// selection if non-empty, else just the focused row's key.
+    /// Used by [`Self::commit_transition`] (via direct `self.selection`
+    /// check) and the future bulk-assign/bulk-fixVersion paths.
+    #[allow(dead_code)]
+    pub fn bulk_keys(&self) -> Vec<String> {
+        if !self.selection.is_empty() {
+            self.selection.iter().cloned().collect()
+        } else {
+            self.focused_key().into_iter().collect()
+        }
+    }
+
     /// Open the inline comment editor for the focused ticket. No-op
     /// unless the detail panel is visible — without it there'd be
     /// nowhere to render the editor.
@@ -635,10 +669,15 @@ impl App {
         }
     }
 
-    /// Commit the highlighted transition. Closes the picker on
-    /// success; leaves it open with an error message on failure.
-    /// Invalidates the cached detail for the issue (status changed)
-    /// and re-fetches the list so the new status shows up.
+    /// Commit the highlighted transition. When `selection` is empty
+    /// this is the single-ticket case. When selection is non-empty,
+    /// the chosen transition's **name** ("Start review") is fired
+    /// against every selected key — each may have a different id for
+    /// the same name (Jira workflows aren't required to use stable
+    /// ids across projects), so we fetch the per-issue transitions
+    /// list and pick by name match. Issues that don't have a matching
+    /// transition are skipped (terminal state / different workflow);
+    /// per-issue errors aggregate into the picker's error slot.
     pub async fn commit_transition(&mut self) {
         let Some(p) = self.transition_picker.as_ref() else {
             return;
@@ -649,31 +688,97 @@ impl App {
         let Some(transition) = list.get(p.selected) else {
             return;
         };
-        let key = p.key.clone();
-        let transition_id = transition.id.clone();
-        let label = transition
+        let transition_name = transition.name.clone();
+        let to_name = transition
             .to_name
             .clone()
             .unwrap_or_else(|| transition.name.clone());
-        match self.client.run_transition(&key, &transition_id).await {
-            Ok(()) => {
-                self.transition_picker = None;
-                self.status = format!("{key} → {label}");
-                // Status changed server-side — drop cached detail
-                // for this key, refresh the list (so the new status
-                // chip in the table updates), and re-warm the
-                // detail if the panel is open.
-                self.detail_cache.remove(&key);
-                self.refresh_active().await;
-                if self.details_visible {
-                    self.ensure_focused_detail().await;
+
+        // Single-ticket case — fire by id, fastest path. Triggered
+        // when selection is empty.
+        if self.selection.is_empty() {
+            let key = p.key.clone();
+            let transition_id = transition.id.clone();
+            match self.client.run_transition(&key, &transition_id).await {
+                Ok(()) => {
+                    self.transition_picker = None;
+                    self.status = format!("{key} → {to_name}");
+                    self.detail_cache.remove(&key);
+                    self.refresh_active().await;
+                    if self.details_visible {
+                        self.ensure_focused_detail().await;
+                    }
+                }
+                Err(e) => {
+                    if let Some(p) = self.transition_picker.as_mut() {
+                        p.error = Some(e.to_string());
+                    }
                 }
             }
-            Err(e) => {
-                if let Some(p) = self.transition_picker.as_mut() {
-                    p.error = Some(e.to_string());
+            return;
+        }
+
+        // Bulk case — N selected keys, one transition name. Per-issue:
+        //   1. fetch transitions
+        //   2. find by name
+        //   3. fire if found, else record "no matching transition"
+        let keys: Vec<String> = self.selection.iter().cloned().collect();
+        let mut ok = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for key in &keys {
+            let id = match self.client.fetch_transitions(key).await {
+                Ok(list) => list
+                    .into_iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(&transition_name))
+                    .map(|t| t.id),
+                Err(e) => {
+                    errors.push(format!("{key}: {e}"));
+                    continue;
                 }
+            };
+            let Some(id) = id else {
+                skipped.push(key.clone());
+                continue;
+            };
+            match self.client.run_transition(key, &id).await {
+                Ok(()) => {
+                    ok += 1;
+                    self.detail_cache.remove(key);
+                }
+                Err(e) => errors.push(format!("{key}: {e}")),
             }
+        }
+
+        if errors.is_empty() {
+            // Clean run — clear selection + picker.
+            self.transition_picker = None;
+            self.selection.clear();
+            let mut msg = format!("{} ticket(s) → {to_name}", ok);
+            if !skipped.is_empty() {
+                msg.push_str(&format!(
+                    " · skipped {}: {}",
+                    skipped.len(),
+                    skipped.join(", ")
+                ));
+            }
+            self.status = msg;
+        } else {
+            // Surface aggregate failures in the picker so the user sees
+            // them; keep selection intact for retry.
+            if let Some(p) = self.transition_picker.as_mut() {
+                p.error = Some(format!(
+                    "{} ok · {} skipped · {} failed — {}",
+                    ok,
+                    skipped.len(),
+                    errors.len(),
+                    errors.join(" / ")
+                ));
+            }
+        }
+        self.refresh_active().await;
+        if self.details_visible {
+            self.ensure_focused_detail().await;
         }
     }
 }
@@ -765,6 +870,7 @@ mod tests {
             transition_picker: None,
             my_account_id: None,
             comment_editor: None,
+            selection: BTreeSet::new(),
         }
     }
 
@@ -948,6 +1054,43 @@ mod tests {
         app.transition_picker_move(1);
         // Stays at 0; no panic.
         assert_eq!(app.transition_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn toggle_selection_adds_then_removes_focused_key() {
+        let mut app = app_with_issues(&[("TE-1", "alpha"), ("TE-2", "beta")]);
+        app.toggle_selection();
+        assert!(app.selection.contains("TE-1"));
+        app.toggle_selection();
+        assert!(!app.selection.contains("TE-1"));
+    }
+
+    #[test]
+    fn bulk_keys_returns_focused_when_selection_empty() {
+        let mut app = app_with_issues(&[("TE-1", "alpha"), ("TE-2", "beta")]);
+        app.tabs[0].selected = 1;
+        assert_eq!(app.bulk_keys(), vec!["TE-2".to_string()]);
+    }
+
+    #[test]
+    fn bulk_keys_returns_selection_when_non_empty() {
+        let mut app = app_with_issues(&[("TE-1", "alpha"), ("TE-2", "beta"), ("TE-3", "gamma")]);
+        app.tabs[0].selected = 0;
+        app.toggle_selection(); // selects TE-1
+        app.tabs[0].selected = 2;
+        app.toggle_selection(); // selects TE-3
+        assert_eq!(
+            app.bulk_keys(),
+            vec!["TE-1".to_string(), "TE-3".to_string()] // BTreeSet sorted
+        );
+    }
+
+    #[test]
+    fn clear_selection_empties_the_set() {
+        let mut app = app_with_issues(&[("TE-1", "a")]);
+        app.toggle_selection();
+        app.clear_selection();
+        assert!(app.selection.is_empty());
     }
 
     #[test]

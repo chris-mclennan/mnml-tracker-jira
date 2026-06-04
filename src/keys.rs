@@ -43,6 +43,10 @@ pub enum Action {
     CommentEditorEnter,
     CommentEditorSubmit,
     CommentEditorCancel,
+    /// `Space` — toggle the focused row in the multi-selection set.
+    ToggleSelection,
+    /// Clear the multi-selection (part of the Esc cascade).
+    ClearSelection,
 }
 
 pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
@@ -96,12 +100,12 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
     }
     match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
-        // Esc cascade: clear an active committed filter, then close
-        // the detail panel, then quit. So a Esc-Esc-Esc safely
-        // unwinds from "filter + detail + ready to leave" without
-        // surprising the user.
+        // Esc cascade: clear selection → clear filter → close
+        // detail → quit. Esc-Esc-Esc-Esc safely unwinds.
         KeyCode::Esc => {
-            if app.filter.is_some() {
+            if !app.selection.is_empty() {
+                Some(Action::ClearSelection)
+            } else if app.filter.is_some() {
                 Some(Action::FilterClear)
             } else if app.details_visible {
                 Some(Action::ToggleDetails)
@@ -135,6 +139,9 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
         // `c` opens the inline comment editor (only meaningful when the
         // detail panel is already visible).
         KeyCode::Char('c') if app.details_visible => Some(Action::OpenCommentEditor),
+        // Space toggles the focused row into the bulk-selection set;
+        // any subsequent `t` operates on the whole set.
+        KeyCode::Char(' ') => Some(Action::ToggleSelection),
         // `d` (lowercase, no modifiers) toggles the detail pane.
         // Ctrl+d above takes precedence for scroll-down.
         KeyCode::Char('d') => Some(Action::ToggleDetails),
@@ -222,6 +229,8 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
         Action::CommentEditorEnter => app.comment_editor_insert('\n'),
         Action::CommentEditorSubmit => app.submit_comment().await,
         Action::CommentEditorCancel => app.close_comment_editor(),
+        Action::ToggleSelection => app.toggle_selection(),
+        Action::ClearSelection => app.clear_selection(),
     }
     // After a navigation action, if the focused key changed and the
     // detail pane is open, fetch the new ticket's detail. Reset the

@@ -195,7 +195,18 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
         .map(|&idx| &tab.issues[idx])
         .map(|i| {
             let cells: Vec<Cell> = columns.iter().map(|c| cell_for_column(i, *c)).collect();
-            Row::new(cells)
+            let mut row = Row::new(cells);
+            // Highlight rows whose key is in the bulk-selection set —
+            // a magenta tint distinguishes "this is in the operation
+            // basket" from the regular cursor's blue/cyan highlight.
+            if app.selection.contains(&i.key) {
+                row = row.style(
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+            row
         })
         .collect();
 
@@ -290,9 +301,11 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     } else if app.filter.as_ref().map(|f| f.editing).unwrap_or(false) {
         " type to filter · Enter commit · Esc cancel "
     } else if app.details_visible {
-        " ↑↓/jk · Ctrl+u/d scroll · d close · c comment · / filter · t move · w watch · r refresh · q quit "
+        " ↑↓ · Ctrl+u/d scroll · d close · c comment · Space pick · / filter · t move · w watch · r · q "
+    } else if !app.selection.is_empty() {
+        " ↑↓ · Space pick · t move all · Esc clear · / filter · d details · r refresh · q quit "
     } else {
-        " 1-9 tab · ↑↓/jk move · / filter · t move · w watch · d details · Enter/o open · r refresh · q quit "
+        " 1-9 tab · ↑↓ · / filter · Space pick · t move · w watch · d details · Enter/o open · r · q "
     };
     let line = Line::from(vec![
         Span::styled(
@@ -610,7 +623,11 @@ fn draw_transition_picker(f: &mut Frame, screen: Rect, app: &App) {
     let y = (screen.height.saturating_sub(h)) / 2;
     let area = Rect::new(x, y, w, h);
 
-    let title = format!(" transition {} ", picker.key);
+    let title = if app.selection.is_empty() {
+        format!(" transition {} ", picker.key)
+    } else {
+        format!(" transition × {} ticket(s) ", app.selection.len())
+    };
     let body: Vec<Line> = match picker.transitions.as_ref() {
         None => vec![Line::from(Span::styled(
             "  loading…",

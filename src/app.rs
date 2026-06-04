@@ -2,7 +2,7 @@
 //! each configured tab. The UI layer reads from this.
 
 use crate::config::{Config, ResolveMode, Tab};
-use crate::jira::{Client, Issue, IssueDetail};
+use crate::jira::{Client, Issue, IssueDetail, Transition};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 
@@ -35,6 +35,29 @@ pub struct App {
     ///   `Some(s)` + `editing == false` → filter committed; selection
     ///     navigates within the filtered subset; `n`/`N` jump matches.
     pub filter: Option<FilterState>,
+    /// Status-transition overlay for the focused ticket. Opened by
+    /// `t`. `Some` ⇒ greedy modal — keys go to the picker (digits to
+    /// pick, ↑↓/jk to move, Enter / Esc to commit / cancel) instead
+    /// of the list. Loaded lazily — `transitions` is `None` while
+    /// the fetch is in flight.
+    pub transition_picker: Option<TransitionPicker>,
+}
+
+/// Modal state for the `t` transition picker.
+#[derive(Debug, Clone)]
+pub struct TransitionPicker {
+    /// Issue key the picker is bound to (captured at open time so a
+    /// background list refresh / cursor move doesn't change targets
+    /// mid-pick).
+    pub key: String,
+    /// `None` while the GET is in flight; `Some(Vec)` once loaded.
+    /// Empty vec is a legitimate response — no transitions available.
+    pub transitions: Option<Vec<Transition>>,
+    /// Highlighted row in the picker (0-based).
+    pub selected: usize,
+    /// Most recent error message — surfaced inside the overlay rather
+    /// than blowing away the status line.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,6 +110,7 @@ impl App {
             detail_cache: HashMap::new(),
             detail_in_flight: None,
             filter: None,
+            transition_picker: None,
         };
         app.refresh_active().await;
         Ok(app)
@@ -361,6 +385,106 @@ pub enum FilterClose {
     Cancel,
 }
 
+impl App {
+    /// Open the `t` transition picker for the focused ticket. Fires
+    /// a transitions fetch; the picker renders a spinner state until
+    /// it arrives. No-op when there's no focused ticket.
+    pub async fn open_transition_picker(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        self.transition_picker = Some(TransitionPicker {
+            key: key.clone(),
+            transitions: None,
+            selected: 0,
+            error: None,
+        });
+        match self.client.fetch_transitions(&key).await {
+            Ok(list) => {
+                if let Some(p) = self.transition_picker.as_mut() {
+                    p.transitions = Some(list);
+                }
+            }
+            Err(e) => {
+                if let Some(p) = self.transition_picker.as_mut() {
+                    p.error = Some(e.to_string());
+                    p.transitions = Some(Vec::new());
+                }
+            }
+        }
+    }
+
+    /// Close the picker without firing a transition.
+    pub fn close_transition_picker(&mut self) {
+        self.transition_picker = None;
+    }
+
+    /// Move the picker highlight by `delta` rows, clamped to the
+    /// loaded transitions list.
+    pub fn transition_picker_move(&mut self, delta: isize) {
+        if let Some(p) = self.transition_picker.as_mut()
+            && let Some(list) = p.transitions.as_ref()
+            && !list.is_empty()
+        {
+            let s = p.selected as isize + delta;
+            p.selected = s.clamp(0, list.len() as isize - 1) as usize;
+        }
+    }
+
+    /// Jump the picker highlight to row `idx` (used for digit keys
+    /// 1-9). No-op if idx is out of range.
+    pub fn transition_picker_select(&mut self, idx: usize) {
+        if let Some(p) = self.transition_picker.as_mut()
+            && let Some(list) = p.transitions.as_ref()
+            && idx < list.len()
+        {
+            p.selected = idx;
+        }
+    }
+
+    /// Commit the highlighted transition. Closes the picker on
+    /// success; leaves it open with an error message on failure.
+    /// Invalidates the cached detail for the issue (status changed)
+    /// and re-fetches the list so the new status shows up.
+    pub async fn commit_transition(&mut self) {
+        let Some(p) = self.transition_picker.as_ref() else {
+            return;
+        };
+        let Some(list) = p.transitions.as_ref() else {
+            return;
+        };
+        let Some(transition) = list.get(p.selected) else {
+            return;
+        };
+        let key = p.key.clone();
+        let transition_id = transition.id.clone();
+        let label = transition
+            .to_name
+            .clone()
+            .unwrap_or_else(|| transition.name.clone());
+        match self.client.run_transition(&key, &transition_id).await {
+            Ok(()) => {
+                self.transition_picker = None;
+                self.status = format!("{key} → {label}");
+                // Status changed server-side — drop cached detail
+                // for this key, refresh the list (so the new status
+                // chip in the table updates), and re-warm the
+                // detail if the panel is open.
+                self.detail_cache.remove(&key);
+                self.refresh_active().await;
+                if self.details_visible {
+                    self.ensure_focused_detail().await;
+                }
+            }
+            Err(e) => {
+                if let Some(p) = self.transition_picker.as_mut() {
+                    p.error = Some(e.to_string());
+                }
+            }
+        }
+    }
+}
+
 /// Resolve a tab's `mode = ...` into a concrete JQL string, or pass
 /// through a literal `jql = "..."` unchanged.
 async fn resolve_tab_jql(tab: &Tab, client: &Client) -> Result<String> {
@@ -445,6 +569,24 @@ mod tests {
             detail_cache: HashMap::new(),
             detail_in_flight: None,
             filter: None,
+            transition_picker: None,
+        }
+    }
+
+    fn picker_with_transitions(keys: &[(&str, &str)]) -> TransitionPicker {
+        let transitions = keys
+            .iter()
+            .map(|(id, name)| Transition {
+                id: id.to_string(),
+                name: name.to_string(),
+                to_name: Some(name.to_string()),
+            })
+            .collect();
+        TransitionPicker {
+            key: "TE-1".to_string(),
+            transitions: Some(transitions),
+            selected: 0,
+            error: None,
         }
     }
 
@@ -558,6 +700,59 @@ mod tests {
         let f = app.filter.as_ref().unwrap();
         assert_eq!(f.buffer, "ab");
         assert_eq!(f.cursor, 2);
+    }
+
+    #[test]
+    fn transition_picker_move_clamps_to_bounds() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.transition_picker = Some(picker_with_transitions(&[
+            ("11", "Start review"),
+            ("21", "Mark blocked"),
+            ("31", "Resolve"),
+        ]));
+        app.transition_picker_move(1);
+        assert_eq!(app.transition_picker.as_ref().unwrap().selected, 1);
+        app.transition_picker_move(10);
+        assert_eq!(app.transition_picker.as_ref().unwrap().selected, 2);
+        app.transition_picker_move(-100);
+        assert_eq!(app.transition_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn transition_picker_select_jumps_to_index() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.transition_picker = Some(picker_with_transitions(&[
+            ("11", "Start review"),
+            ("21", "Mark blocked"),
+            ("31", "Resolve"),
+        ]));
+        app.transition_picker_select(2);
+        assert_eq!(app.transition_picker.as_ref().unwrap().selected, 2);
+        // Out-of-range no-op.
+        app.transition_picker_select(99);
+        assert_eq!(app.transition_picker.as_ref().unwrap().selected, 2);
+    }
+
+    #[test]
+    fn close_transition_picker_drops_the_modal() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.transition_picker = Some(picker_with_transitions(&[("11", "Resolve")]));
+        app.close_transition_picker();
+        assert!(app.transition_picker.is_none());
+    }
+
+    #[test]
+    fn transition_picker_move_with_empty_list_is_a_no_op() {
+        let mut app = app_with_issues(&[("TE-1", "alpha")]);
+        app.transition_picker = Some(TransitionPicker {
+            key: "TE-1".to_string(),
+            transitions: Some(Vec::new()),
+            selected: 0,
+            error: None,
+        });
+        app.transition_picker_move(1);
+        // Stays at 0; no panic.
+        assert_eq!(app.transition_picker.as_ref().unwrap().selected, 0);
     }
 
     #[test]

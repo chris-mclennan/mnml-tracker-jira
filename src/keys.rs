@@ -26,10 +26,31 @@ pub enum Action {
     FilterCancel,
     /// Drop the committed filter, returning to the full list.
     FilterClear,
+    /// `t` — open the status transition picker for the focused ticket.
+    OpenTransitionPicker,
+    /// Transition-picker arrow keys + digit jumps + commit + cancel.
+    TransitionUp,
+    TransitionDown,
+    TransitionSelect(usize),
+    TransitionCommit,
+    TransitionCancel,
 }
 
 pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
     let m = key.modifiers;
+    // Transition picker is a greedy modal — its keys win first.
+    if app.transition_picker.is_some() {
+        return match key.code {
+            KeyCode::Esc => Some(Action::TransitionCancel),
+            KeyCode::Enter => Some(Action::TransitionCommit),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::TransitionUp),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::TransitionDown),
+            KeyCode::Char(c @ '1'..='9') => {
+                Some(Action::TransitionSelect((c as u8 - b'1') as usize))
+            }
+            _ => None,
+        };
+    }
     // When the filter editor is open it greedily swallows keystrokes —
     // every printable becomes part of the buffer, Esc cancels, Enter
     // commits. The list/tab/detail chords below resume after the
@@ -81,6 +102,9 @@ pub fn handle(key: KeyEvent, app: &App) -> Option<Action> {
         // `/` opens the filter editor — substring match against key
         // + summary, case-insensitive, applies live as you type.
         KeyCode::Char('/') => Some(Action::OpenFilter),
+        // `t` opens the status-transition picker for the focused
+        // ticket (greedy modal; picker keys take over the next event).
+        KeyCode::Char('t') => Some(Action::OpenTransitionPicker),
         // `d` (lowercase, no modifiers) toggles the detail pane.
         // Ctrl+d above takes precedence for scroll-down.
         KeyCode::Char('d') => Some(Action::ToggleDetails),
@@ -155,6 +179,12 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
         Action::FilterCommit => app.close_filter(FilterClose::Commit),
         Action::FilterCancel => app.close_filter(FilterClose::Cancel),
         Action::FilterClear => app.filter = None,
+        Action::OpenTransitionPicker => app.open_transition_picker().await,
+        Action::TransitionUp => app.transition_picker_move(-1),
+        Action::TransitionDown => app.transition_picker_move(1),
+        Action::TransitionSelect(i) => app.transition_picker_select(i),
+        Action::TransitionCommit => app.commit_transition().await,
+        Action::TransitionCancel => app.close_transition_picker(),
     }
     // After a navigation action, if the focused key changed and the
     // detail pane is open, fetch the new ticket's detail. Reset the

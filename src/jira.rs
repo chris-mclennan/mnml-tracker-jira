@@ -102,6 +102,70 @@ impl Client {
         format!("{}/browse/{key}", self.base)
     }
 
+    /// Fetch the workflow transitions available for `key`. Different
+    /// per-issue depending on the project's workflow + the current
+    /// status (Jira's workflow engine is graph-based; you can only
+    /// see outgoing edges from the current node). Empty list is
+    /// valid — it just means the user has no transitions available
+    /// (lacks permission, or a terminal state with no outgoing edges).
+    pub async fn fetch_transitions(&self, key: &str) -> Result<Vec<Transition>> {
+        let url = format!("{}/rest/api/3/issue/{key}/transitions", self.base);
+        let resp = self
+            .http
+            .get(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .with_context(|| format!("fetching transitions for {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira transitions fetch failed for {key}: {status}: {text}"
+            ));
+        }
+        let raw: TransitionsRaw = resp
+            .json()
+            .await
+            .with_context(|| format!("parsing transitions for {key}"))?;
+        Ok(raw
+            .transitions
+            .into_iter()
+            .map(|t| Transition {
+                id: t.id,
+                name: t.name,
+                to_name: t.to.as_ref().map(|s| s.name.clone()),
+            })
+            .collect())
+    }
+
+    /// Fire a workflow transition by id. Returns `Ok(())` on success
+    /// (Jira returns 204 No Content on a successful transition).
+    pub async fn run_transition(&self, key: &str, transition_id: &str) -> Result<()> {
+        let url = format!("{}/rest/api/3/issue/{key}/transitions", self.base);
+        let body = serde_json::json!({
+            "transition": { "id": transition_id }
+        });
+        let resp = self
+            .http
+            .post(&url)
+            .basic_auth(&self.email, Some(&self.token))
+            .header("Accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("posting transition for {key}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Jira transition failed for {key}: {status}: {text}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Fetch a single issue's description + comments. The fields
     /// already on `Issue` (status, assignee, …) are included too so
     /// the detail view can re-read updated state without a stale
@@ -171,6 +235,31 @@ pub struct Comment {
     pub author: Option<String>,
     pub created: Option<String>,
     pub body: String,
+}
+
+/// One outgoing workflow edge from the issue's current status. The
+/// `to_name` is the resulting status (e.g. "In Review"); `name` is
+/// the *button label* the user clicks in Jira's UI (e.g. "Start review")
+/// which can differ from the destination state.
+#[derive(Debug, Clone)]
+pub struct Transition {
+    pub id: String,
+    pub name: String,
+    pub to_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransitionsRaw {
+    transitions: Vec<TransitionRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct TransitionRaw {
+    id: String,
+    name: String,
+    #[serde(default)]
+    to: Option<NamedField>,
 }
 
 #[derive(Debug, Deserialize)]

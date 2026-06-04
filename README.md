@@ -96,9 +96,28 @@ Modes:
 | `d`            | Toggle right-half ticket detail panel        |
 | `Ctrl+u` / `Ctrl+d` | Scroll detail panel up / down (when open) |
 | `/`            | Open filter editor (substring match)         |
+| `t`            | Open status transition picker for focused ticket |
 | `r`            | Refresh active tab (+ detail if open)        |
 | `Esc`          | Clear filter → close detail → quit (cascade) |
 | `q` / `Ctrl+C` | Quit                                         |
+
+### Status transition picker
+
+`t` opens a centered modal listing the workflow transitions available
+for the focused ticket — exactly what Jira's web UI shows in the
+"Status" dropdown, just keyboard-driven. Numbered `1`-`9` for direct
+selection, `↑↓` / `jk` to move, Enter to commit, Esc to cancel.
+
+The list is per-issue: Jira's workflow engine is graph-based, so the
+options depend on the current status (what edges leave this node) and
+your project permissions. A terminal state with no outgoing edges
+renders as `(no transitions available)` — that's normal, not a bug.
+
+On success the modal closes, the active tab refreshes (so the new
+status chip shows up in the table), and any cached ticket detail
+gets dropped so a re-fetch picks up the moved-to state. On failure
+(permission denied, validation required) the error surfaces inside
+the modal and the picker stays open.
 
 ### Filter
 
@@ -155,9 +174,11 @@ newlines.
 - Atlassian Document Format → plain text for description + comments
 - Filter editor (`/`) — substring match on key + summary,
   case-insensitive, applies live; Esc cascade for cleanup
+- Status transition picker (`t`) — modal listing the focused
+  ticket's available workflow transitions; POSTs the chosen
+  one + refreshes the list
 
 **Planned:**
-- Status transition picker (`t` opens "move to → " menu)
 - Watcher / star toggle
 - Per-tab column override
 

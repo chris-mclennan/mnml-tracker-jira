@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs},
 };
 use std::io::Stdout;
 use std::time::{Duration, Instant};
@@ -97,6 +97,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_table(f, chunks[1], app);
     }
     draw_status(f, chunks[2], app);
+    // Modal overlays last so they sit on top of everything else.
+    if app.transition_picker.is_some() {
+        draw_transition_picker(f, size, app);
+    }
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
@@ -294,17 +298,14 @@ fn draw_filter_strip(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    let hint = match (
-        app.filter.as_ref().map(|f| f.editing).unwrap_or(false),
-        app.details_visible,
-    ) {
-        (true, _) => " type to filter · Enter commit · Esc cancel ",
-        (false, true) => {
-            " ↑↓/jk move · Ctrl+u/d scroll detail · d/Esc close · / filter · r refresh · o open · q quit "
-        }
-        (false, false) => {
-            " 1-9 tab · ↑↓/jk move · / filter · d details · Enter/o open · r refresh · q quit "
-        }
+    let hint = if app.transition_picker.is_some() {
+        " 1-9 jump · ↑↓/jk move · Enter commit · Esc cancel "
+    } else if app.filter.as_ref().map(|f| f.editing).unwrap_or(false) {
+        " type to filter · Enter commit · Esc cancel "
+    } else if app.details_visible {
+        " ↑↓/jk move · Ctrl+u/d scroll · d/Esc close · / filter · t transition · r refresh · o open · q quit "
+    } else {
+        " 1-9 tab · ↑↓/jk move · / filter · t transition · d details · Enter/o open · r refresh · q quit "
     };
     let line = Line::from(vec![
         Span::styled(
@@ -460,6 +461,103 @@ fn draw_details(f: &mut Frame, area: Rect, app: &App) {
     let p = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" detail "))
         .scroll((scroll, 0));
+    f.render_widget(p, area);
+}
+
+/// Modal overlay listing the focused ticket's available workflow
+/// transitions. Centered ~50% × ~50% in the screen, opaque (Clear
+/// widget below) so the table underneath doesn't bleed through.
+fn draw_transition_picker(f: &mut Frame, screen: Rect, app: &App) {
+    let Some(picker) = app.transition_picker.as_ref() else {
+        return;
+    };
+    // Center a 60-cell × 14-row box (clamped to screen) — wide enough
+    // for "Start review → In Review", short enough to feel modal.
+    let w = 60.min(screen.width.saturating_sub(4));
+    let h = 14.min(screen.height.saturating_sub(4));
+    let x = (screen.width.saturating_sub(w)) / 2;
+    let y = (screen.height.saturating_sub(h)) / 2;
+    let area = Rect::new(x, y, w, h);
+
+    let title = format!(" transition {} ", picker.key);
+    let body: Vec<Line> = match picker.transitions.as_ref() {
+        None => vec![Line::from(Span::styled(
+            "  loading…",
+            Style::default().fg(Color::DarkGray),
+        ))],
+        Some(list) if list.is_empty() => {
+            let msg = if let Some(err) = picker.error.as_ref() {
+                format!("  error: {err}")
+            } else {
+                "  (no transitions available — terminal state or no permission)".to_string()
+            };
+            vec![
+                Line::from(Span::styled(msg, Style::default().fg(Color::Red))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  Esc to close",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                )),
+            ]
+        }
+        Some(list) => {
+            let mut lines: Vec<Line> = list
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let arrow = match t.to_name.as_deref() {
+                        Some(dest) => format!("  {arrow} {dest}", arrow = "→"),
+                        None => String::new(),
+                    };
+                    let prefix = if i == picker.selected { "▸ " } else { "  " };
+                    // Number-key hint for the first 9 (1-9 jumps).
+                    let num = if i < 9 {
+                        format!("{}. ", i + 1)
+                    } else {
+                        "   ".to_string()
+                    };
+                    let style = if i == picker.selected {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    Line::from(vec![Span::styled(
+                        format!("{prefix}{num}{name}{arrow}", name = t.name),
+                        style,
+                    )])
+                })
+                .collect();
+            if let Some(err) = picker.error.as_ref() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("  error: {err}"),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  1-9 jump · ↑↓/jk move · Enter commit · Esc cancel",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            )));
+            lines
+        }
+    };
+
+    // Clear the cells underneath so the table doesn't bleed through.
+    f.render_widget(Clear, area);
+    let p = Paragraph::new(body).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().bg(Color::Black))
+            .title(title),
+    );
     f.render_widget(p, area);
 }
 

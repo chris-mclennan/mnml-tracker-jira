@@ -1,4 +1,4 @@
-# mnml-tickets-jira
+# mnml-tracker-jira
 
 Jira ticket viewer for [mnml](https://mnml.sh) — terminal TUI with
 configurable tabs (JQL queries or auto-resolved release `fixVersion`s),
@@ -28,7 +28,7 @@ mnml pane via the blit protocol.
 ## Install
 
 ```sh
-cargo install --git https://github.com/chris-mclennan/mnml-tickets-jira mnml-tickets-jira
+cargo install --git https://github.com/chris-mclennan/mnml-tracker-jira mnml-tracker-jira
 ```
 
 (Homebrew tap + binary releases will follow once the binary stabilises.)
@@ -38,21 +38,21 @@ cargo install --git https://github.com/chris-mclennan/mnml-tickets-jira mnml-tic
 1. **Get a Jira API token**:
    <https://id.atlassian.com/manage-profile/security/api-tokens>
 
-2. **Save the token** to `~/.config/mnml-tickets-jira/token`
+2. **Save the token** to `~/.config/mnml-tracker-jira/token`
    (`chmod 600`).
 
 3. **Run once** to scaffold the config template:
    ```sh
-   mnml-tickets-jira
+   mnml-tracker-jira
    ```
-   This writes `~/.config/mnml-tickets-jira.toml` and exits with
+   This writes `~/.config/mnml-tracker-jira.toml` and exits with
    instructions. Edit `jira_url`, `email`, and the `[[tabs]]` list.
 
 4. **Re-run** — the TUI launches with your configured tabs.
 
 5. **Verify** the resolved config + auth state:
    ```sh
-   mnml-tickets-jira --check
+   mnml-tracker-jira --check
    ```
 
 ## Tabs
@@ -238,7 +238,7 @@ columns = ["key", "priority", "status", "updated", "summary"]
 ### Standalone
 
 ```sh
-mnml-tickets-jira
+mnml-tracker-jira
 ```
 
 Works in any terminal. No mnml required.
@@ -248,7 +248,7 @@ Works in any terminal. No mnml required.
 From inside mnml:
 
 ```vim
-:host.launch mnml-tickets-jira
+:host.launch mnml-tracker-jira
 ```
 
 mnml spawns it with `--blit <socket>` and renders the streamed cell

@@ -929,7 +929,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mnml-tickets-jira"
+name = "mnml-tracker-jira"
 version = "0.2.0"
 dependencies = [
  "anyhow",

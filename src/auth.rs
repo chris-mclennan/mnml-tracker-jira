@@ -1,5 +1,5 @@
 //! Auth — the Jira API token lives in
-//! `~/.config/mnml-tickets-jira/token`. Generated at:
+//! `~/.config/mnml-tracker-jira/token`. Generated at:
 //!   https://id.atlassian.com/manage-profile/security/api-tokens
 //!
 //! The HTTP layer uses HTTP Basic auth with `email:token`.
@@ -13,7 +13,7 @@ pub fn token_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
-        .join("mnml-tickets-jira")
+        .join("mnml-tracker-jira")
         .join("token")
 }
 

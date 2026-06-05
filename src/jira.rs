@@ -19,7 +19,7 @@ impl Client {
     pub fn new(base_url: &str, email: &str, token: &str) -> Result<Self> {
         let base = base_url.trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
-            .user_agent("mnml-tickets-jira/0.1.0")
+            .user_agent("mnml-tracker-jira/0.1.0")
             .build()?;
         Ok(Self {
             http,

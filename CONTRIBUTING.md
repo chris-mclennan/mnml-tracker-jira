@@ -1,4 +1,4 @@
-# Contributing to mnml-tickets-jira
+# Contributing to mnml-tracker-jira
 
 Thanks for taking a look! This repo is part of the [mnml integration family](https://mnml.sh/manual/integrations/community/) — a standalone Jira ticket viewer that doubles as a hosted mnml pane.
 
@@ -14,9 +14,9 @@ Thanks for taking a look! This repo is part of the [mnml integration family](htt
 src/
 ├── main.rs                # CLI + mode dispatch (TUI / --blit / --check)
 ├── app.rs                 # state — tabs, ticket lists, selection
-├── config.rs              # ~/.config/mnml-tickets-jira.toml
+├── config.rs              # ~/.config/mnml-tracker-jira.toml
 ├── jira.rs                # ← Jira REST client + tab resolution (swap this when forking)
-├── auth.rs                # token loading from ~/.config/mnml-tickets-jira/token
+├── auth.rs                # token loading from ~/.config/mnml-tracker-jira/token
 ├── keys.rs                # action enum + key bindings
 ├── ui.rs                  # ratatui draw + crossterm loop
 └── blit.rs                # tmnl-protocol over UDS — copied verbatim
@@ -29,15 +29,15 @@ This is the cleanest fork target for **ticket-system viewers** — the tabbed li
 ## Local development
 
 ```sh
-git clone https://github.com/chris-mclennan/mnml-tickets-jira
-cd mnml-tickets-jira
+git clone https://github.com/chris-mclennan/mnml-tracker-jira
+cd mnml-tracker-jira
 cargo build
 cargo test
 cargo clippy --all-targets        # must be warning-free
 cargo fmt                          # before committing
 ```
 
-You'll need a Jira instance to test against. The free **Atlassian Cloud** tier works (create a sandbox site at `<your-name>.atlassian.net`). Save your API token to `~/.config/mnml-tickets-jira/token` and run `cargo run -- --check` to verify.
+You'll need a Jira instance to test against. The free **Atlassian Cloud** tier works (create a sandbox site at `<your-name>.atlassian.net`). Save your API token to `~/.config/mnml-tracker-jira/token` and run `cargo run -- --check` to verify.
 
 ## PR conventions
 

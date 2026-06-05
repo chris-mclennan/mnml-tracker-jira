@@ -1,15 +1,15 @@
 [package]
-name = "mnml-tickets-jira"
+name = "mnml-tracker-jira"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Jira ticket viewer for mnml — terminal TUI with configurable tabs (JQL or auto-resolved releases). Runs standalone or as an mnml-hosted pane."
 homepage = "https://mnml.sh"
-repository = "https://github.com/chris-mclennan/mnml-tickets-jira"
+repository = "https://github.com/chris-mclennan/mnml-tracker-jira"
 readme = "README.md"
 
 [[bin]]
-name = "mnml-tickets-jira"
+name = "mnml-tracker-jira"
 path = "src/main.rs"
 
 [dependencies]

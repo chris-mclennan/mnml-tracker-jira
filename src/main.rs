@@ -1,4 +1,4 @@
-//! mnml-tickets-jira — terminal TUI for browsing Jira tickets, with
+//! mnml-tracker-jira — terminal TUI for browsing Jira tickets, with
 //! configurable per-tab JQL queries and (optionally) auto-resolved
 //! release fixVersions.
 //!
@@ -20,10 +20,10 @@ use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "mnml-tickets-jira", version, about)]
+#[command(name = "mnml-tracker-jira", version, about)]
 struct Cli {
     /// Path to the config file. Defaults to
-    /// `~/.config/mnml-tickets-jira.toml`.
+    /// `~/.config/mnml-tracker-jira.toml`.
     #[arg(long)]
     config: Option<std::path::PathBuf>,
 

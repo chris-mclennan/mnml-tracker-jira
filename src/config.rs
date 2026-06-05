@@ -1,4 +1,4 @@
-//! TOML config — read from `~/.config/mnml-tickets-jira.toml`.
+//! TOML config — read from `~/.config/mnml-tracker-jira.toml`.
 //!
 //! See `Config::EXAMPLE` for the default template that gets written
 //! when no file exists. Each tab is either:
@@ -124,7 +124,7 @@ pub enum ResolveMode {
 }
 
 impl Config {
-    pub const EXAMPLE: &'static str = r##"# mnml-tickets-jira config. Edit and re-run.
+    pub const EXAMPLE: &'static str = r##"# mnml-tracker-jira config. Edit and re-run.
 
 # Your Atlassian-hosted Jira instance.
 jira_url = "https://yourorg.atlassian.net"
@@ -133,7 +133,7 @@ jira_url = "https://yourorg.atlassian.net"
 # username. Generate the token at:
 #   https://id.atlassian.com/manage-profile/security/api-tokens
 # and save it (chmod 600) to:
-#   ~/.config/mnml-tickets-jira/token
+#   ~/.config/mnml-tracker-jira/token
 email = "you@example.com"
 
 # Auto-refresh in seconds. 0 disables; user can still press `r`.
@@ -214,7 +214,7 @@ pub fn default_config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
-        .join("mnml-tickets-jira.toml")
+        .join("mnml-tracker-jira.toml")
 }
 
 /// Load the config from `path`. If the file doesn't exist, write the

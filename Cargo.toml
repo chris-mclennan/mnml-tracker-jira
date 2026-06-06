@@ -3,10 +3,17 @@ name = "mnml-tracker-jira"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+authors = ["Chris McLennan"]
 description = "Jira ticket viewer for mnml — terminal TUI with configurable tabs (JQL or auto-resolved releases). Runs standalone or as an mnml-hosted pane."
 homepage = "https://mnml.sh"
 repository = "https://github.com/chris-mclennan/mnml-tracker-jira"
 readme = "README.md"
+
+[package.metadata.wix]
+upgrade-guid = "280E5ED1-3DE8-4B48-9CD0-3AC0134679BD"
+path-guid = "6E548618-E927-4EAC-819D-27607083C563"
+license = false
+eula = false
 
 [[bin]]
 name = "mnml-tracker-jira"

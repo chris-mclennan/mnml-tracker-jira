@@ -14,6 +14,7 @@ mod blit;
 mod config;
 mod jira;
 mod keys;
+mod theme;
 mod ui;
 
 use anyhow::Result;

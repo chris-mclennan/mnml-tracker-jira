@@ -20,6 +20,8 @@ name = "mnml-tracker-jira"
 path = "src/main.rs"
 
 [dependencies]
+mnml-bridge = { path = "../mnml/crates/mnml-bridge", version = "0.1.0" }
+
 # TUI
 ratatui = "0.29"
 crossterm = "0.28"

@@ -10,7 +10,6 @@
 
 mod app;
 mod auth;
-mod blit;
 mod config;
 mod jira;
 mod keys;
@@ -31,12 +30,6 @@ struct Cli {
     /// Print the resolved config + auth setup hints and exit.
     #[arg(long)]
     check: bool,
-
-    /// Run in blit-host mode: connect to the given Unix socket
-    /// (a tmnl-protocol server — usually mnml's `pane_host` slot)
-    /// and render cell frames over the wire instead of stdout.
-    #[arg(long, value_name = "SOCKET")]
-    blit: Option<std::path::PathBuf>,
 }
 
 #[tokio::main]
@@ -59,10 +52,6 @@ async fn main() -> Result<()> {
     let client = jira::Client::new(&cfg.jira_url, &cfg.email, &token)?;
 
     let mut app = app::App::new(cfg, client).await?;
-    if let Some(socket) = cli.blit.as_deref() {
-        blit::run(&mut app, socket).await?;
-    } else {
-        ui::run(&mut app).await?;
-    }
+    ui::run(&mut app).await?;
     Ok(())
 }

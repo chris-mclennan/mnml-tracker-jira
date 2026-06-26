@@ -43,11 +43,6 @@ dirs = "5"
 url = "2"
 webbrowser = "1"
 
-# Blit-host mode — render into a cell grid + ship over UDS to a tmnl
-# server (or to mnml's pane_host). Same wire protocol mnml + mixr +
-# tmnl share.
-tmnl-protocol = { path = "../tmnl-protocol" }
-
 [dev-dependencies]
 tempfile = "3"
 
